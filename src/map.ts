@@ -1,0 +1,299 @@
+import { Map as MLMap, NavigationControl, setRTLTextPlugin, setWorkerUrl, type GeoJSONSource, type LngLatLike } from 'maplibre-gl';
+import 'maplibre-gl/dist/maplibre-gl.css';
+// MapLibre locates its worker relative to its own module URL, which bundling breaks, so bundle it explicitly.
+import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
+import type { FeatureCollection, Polygon, Point } from 'geojson';
+import { avgRating, type Place } from './store';
+import { Clouds, type Hole } from './clouds';
+
+export const ISRAEL_BOUNDS: [[number, number], [number, number]] = [[34.2, 29.45], [35.95, 33.35]];
+const MAX_BOUNDS: [[number, number], [number, number]] = [[32.6, 28.6], [37.6, 34.2]];
+const STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty';
+const REVEAL_METERS = 160;
+const REVEAL_MIN_PX = 34;
+const GROW_MS = 1400;
+const REVEAL_MS = 1800;
+
+/** Colour ramp from a disappointing cup to a perfect one. */
+export const RATING_COLORS: [number, string][] = [
+  [1, '#a8324a'],
+  [2, '#d9653b'],
+  [3, '#e8b23a'],
+  [4, '#8db650'],
+  [5, '#2e9a6b'],
+];
+
+export function ratingColor(r: number): string {
+  for (let i = RATING_COLORS.length - 1; i >= 0; i--) if (r >= RATING_COLORS[i][0]) return RATING_COLORS[i][1];
+  return RATING_COLORS[0][1];
+}
+
+const colorExpr = (prop: string) => [
+  'interpolate', ['linear'], ['get', prop],
+  ...RATING_COLORS.flatMap(([r, c]) => [r, c]),
+];
+
+function square(lng: number, lat: number, halfMeters: number): Polygon {
+  const dLat = halfMeters / 111_320;
+  const dLng = halfMeters / (111_320 * Math.cos((lat * Math.PI) / 180));
+  return {
+    type: 'Polygon',
+    coordinates: [[
+      [lng - dLng, lat - dLat], [lng + dLng, lat - dLat],
+      [lng + dLng, lat + dLat], [lng - dLng, lat + dLat], [lng - dLng, lat - dLat],
+    ]],
+  };
+}
+
+const easeOutBack = (t: number) => {
+  const c1 = 1.4, c3 = c1 + 1;
+  return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+};
+const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
+const clamp01 = (t: number) => Math.max(0, Math.min(1, t));
+
+export interface CoffeeMapEvents {
+  onPlaceClick: (id: string) => void;
+  onMapClick: (lng: number, lat: number, suggestedName: string | null) => void;
+}
+
+export class CoffeeMap {
+  readonly map: MLMap;
+  private places: Place[] = [];
+  /** Animation start times per place id, for the cloud reveal and building growth. */
+  private appearAt = new Map<string, number>();
+  private extraHole: { lng: number; lat: number } | null = null;
+  private loaded = false;
+  private animating = false;
+  readonly clouds: Clouds;
+
+  constructor(container: HTMLElement, private events: CoffeeMapEvents) {
+    setWorkerUrl(workerUrl);
+    setRTLTextPlugin('https://unpkg.com/@mapbox/mapbox-gl-rtl-text@0.3.0/dist/mapbox-gl-rtl-text.js', true)
+      .catch(() => { /* Hebrew labels will just render unshaped */ });
+
+    this.map = new MLMap({
+      container,
+      style: STYLE_URL,
+      bounds: ISRAEL_BOUNDS,
+      fitBoundsOptions: { padding: 40 },
+      maxBounds: MAX_BOUNDS,
+      maxPitch: 75,
+      attributionControl: { compact: true },
+    });
+    this.map.addControl(new NavigationControl({ visualizePitch: true }), 'bottom-right');
+
+    this.clouds = new Clouds(container, () => this.cloudView(), () => this.holes());
+
+    this.map.on('load', () => this.onLoad());
+    this.map.on('click', (e) => {
+      const hit = this.map.queryRenderedFeatures(e.point, { layers: ['place-tower', 'place-crown', 'place-dot'] });
+      const id = hit[0]?.properties?.id;
+      if (id) return this.events.onPlaceClick(String(id));
+      this.events.onMapClick(e.lngLat.lng, e.lngLat.lat, this.poiNameAt(e.point.x, e.point.y));
+    });
+    for (const layer of ['place-tower', 'place-crown', 'place-dot']) {
+      this.map.on('mouseenter', layer, () => (this.map.getCanvas().style.cursor = 'pointer'));
+      this.map.on('mouseleave', layer, () => (this.map.getCanvas().style.cursor = ''));
+    }
+  }
+
+  private onLoad() {
+    const map = this.map;
+    map.setLight({ anchor: 'viewport', color: '#fff6e8', intensity: 0.45, position: [1.3, 210, 40] });
+
+    const empty: FeatureCollection = { type: 'FeatureCollection', features: [] };
+    map.addSource('places-poly', { type: 'geojson', data: empty });
+    map.addSource('places-pt', { type: 'geojson', data: empty });
+
+    map.addLayer({
+      id: 'place-glow',
+      type: 'circle',
+      source: 'places-pt',
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 7, 10, 12, 22, 16, 60],
+        'circle-color': colorExpr('rating') as never,
+        'circle-blur': 1,
+        'circle-opacity': ['*', 0.45, ['get', 'grow']],
+        'circle-pitch-alignment': 'map',
+      },
+    });
+    map.addLayer({
+      id: 'place-dot',
+      type: 'circle',
+      source: 'places-pt',
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 7, 5, 12, 7, 14.5, 4],
+        'circle-color': colorExpr('rating') as never,
+        'circle-stroke-color': '#fff',
+        'circle-stroke-width': 2,
+        'circle-opacity': ['interpolate', ['linear'], ['zoom'], 13.5, 1, 15, 0],
+        'circle-stroke-opacity': ['interpolate', ['linear'], ['zoom'], 13.5, 1, 15, 0],
+      },
+    });
+    map.addLayer({
+      id: 'place-tower',
+      type: 'fill-extrusion',
+      source: 'places-poly',
+      filter: ['==', ['get', 'part'], 'tower'],
+      minzoom: 12,
+      paint: {
+        'fill-extrusion-color': colorExpr('rating') as never,
+        'fill-extrusion-height': ['get', 'height'],
+        'fill-extrusion-base': ['get', 'base'],
+        'fill-extrusion-opacity': 0.95,
+        'fill-extrusion-vertical-gradient': true,
+      },
+    });
+    map.addLayer({
+      id: 'place-crown',
+      type: 'fill-extrusion',
+      source: 'places-poly',
+      filter: ['==', ['get', 'part'], 'crown'],
+      minzoom: 12,
+      paint: {
+        'fill-extrusion-color': '#fff3dc',
+        'fill-extrusion-height': ['get', 'height'],
+        'fill-extrusion-base': ['get', 'base'],
+        'fill-extrusion-opacity': 0.95,
+      },
+    });
+    map.addLayer({
+      id: 'place-label',
+      type: 'symbol',
+      source: 'places-pt',
+      layout: {
+        'text-field': ['format', ['get', 'name'], {}, '\n', {}, ['get', 'stars'], { 'font-scale': 0.85 }],
+        'text-font': ['Noto Sans Bold'],
+        'text-size': ['interpolate', ['linear'], ['zoom'], 9, 11, 15, 14],
+        'text-anchor': 'top',
+        'text-offset': [0, 0.9],
+        'text-allow-overlap': false,
+      },
+      paint: {
+        'text-color': '#3b2418',
+        'text-halo-color': '#fffaf2',
+        'text-halo-width': 1.6,
+        'text-opacity': ['get', 'grow'],
+      },
+    });
+
+    this.loaded = true;
+    this.render();
+  }
+
+  /** Name of a café / POI under the click, so the form can be pre-filled. */
+  private poiNameAt(x: number, y: number): string | null {
+    const feats = this.map
+      .queryRenderedFeatures([[x - 14, y - 14], [x + 14, y + 14]])
+      .filter((f) => f.sourceLayer === 'poi' && (f.properties?.['name:en'] || f.properties?.name));
+    const cafe = feats.find((f) => f.properties?.class === 'cafe' || f.properties?.subclass === 'cafe');
+    const f = cafe ?? feats[0];
+    return f ? String(f.properties['name:he'] || f.properties.name || f.properties['name:en']) : null;
+  }
+
+  /** New places animate in; `stagger` makes a batch (e.g. on startup) appear one after another. */
+  setPlaces(places: Place[], opts: { stagger?: boolean } = {}) {
+    const now = performance.now();
+    places.forEach((p, i) => {
+      if (!this.appearAt.has(p.id)) this.appearAt.set(p.id, now + (opts.stagger ? 600 + i * 140 : 0));
+    });
+    this.places = places;
+    this.render();
+  }
+
+  /** Restart the grow animation for one place (e.g. after rating it again). */
+  bump(id: string) {
+    this.appearAt.set(id, performance.now());
+    this.render();
+  }
+
+  setPickPoint(p: { lng: number; lat: number } | null) {
+    this.extraHole = p;
+  }
+
+  private progress(id: string, ms: number): number {
+    const t0 = this.appearAt.get(id) ?? 0;
+    return clamp01((performance.now() - t0) / ms);
+  }
+
+  private render = () => {
+    if (!this.loaded) return;
+    const polys: FeatureCollection<Polygon> = { type: 'FeatureCollection', features: [] };
+    const pts: FeatureCollection<Point> = { type: 'FeatureCollection', features: [] };
+    let pending = false;
+
+    for (const p of this.places) {
+      const rating = avgRating(p);
+      const raw = this.progress(p.id, GROW_MS);
+      if (raw < 1) pending = true;
+      const grow = raw <= 0 ? 0 : easeOutBack(raw);
+      const towerH = (18 + rating * 24) * grow;
+      const props = { id: p.id, rating };
+      polys.features.push(
+        { type: 'Feature', geometry: square(p.lng, p.lat, 13), properties: { ...props, part: 'tower', base: 0, height: towerH } },
+        { type: 'Feature', geometry: square(p.lng, p.lat, 8), properties: { ...props, part: 'crown', base: towerH, height: towerH + 7 * grow } },
+      );
+      pts.features.push({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [p.lng, p.lat] },
+        properties: {
+          ...props,
+          name: p.name,
+          stars: `${rating.toFixed(1)} / 5`,
+          grow: clamp01(raw * 1.5),
+        },
+      });
+    }
+
+    (this.map.getSource('places-poly') as GeoJSONSource | undefined)?.setData(polys);
+    (this.map.getSource('places-pt') as GeoJSONSource | undefined)?.setData(pts);
+
+    if (pending && !this.animating) {
+      this.animating = true;
+      requestAnimationFrame(() => {
+        this.animating = false;
+        this.render();
+      });
+    }
+  };
+
+  private cloudView() {
+    const anchor = this.map.project([35, 31.5]);
+    const z = this.map.getZoom();
+    return { anchorX: anchor.x, anchorY: anchor.y, scale: 260 * Math.pow(2, (z - 8) * 0.35) };
+  }
+
+  private holePx(lng: number, lat: number, meters: number) {
+    const c = this.map.project([lng, lat]);
+    const e = this.map.project([lng + meters / (111_320 * Math.cos((lat * Math.PI) / 180)), lat]);
+    return { x: c.x, y: c.y, r: Math.max(REVEAL_MIN_PX, Math.hypot(e.x - c.x, e.y - c.y)) };
+  }
+
+  private holes(): Hole[] {
+    const out: Hole[] = this.places.map((p) => ({
+      ...this.holePx(p.lng, p.lat, REVEAL_METERS),
+      a: easeOutCubic(this.progress(p.id, REVEAL_MS)),
+    }));
+    if (this.extraHole) out.push({ ...this.holePx(this.extraHole.lng, this.extraHole.lat, 120), a: 0.8 });
+    return out;
+  }
+
+  flyTo(center: LngLatLike, zoom = 16.3) {
+    this.map.flyTo({ center, zoom, pitch: 58, bearing: -20, speed: 1.4, essential: true });
+  }
+
+  showAll() {
+    if (!this.places.length) {
+      this.map.fitBounds(ISRAEL_BOUNDS, { padding: 40, pitch: 0, bearing: 0 });
+      return;
+    }
+    const lngs = this.places.map((p) => p.lng);
+    const lats = this.places.map((p) => p.lat);
+    const pad = 0.02;
+    this.map.fitBounds(
+      [[Math.min(...lngs) - pad, Math.min(...lats) - pad], [Math.max(...lngs) + pad, Math.max(...lats) + pad]],
+      { padding: 80, maxZoom: 15, pitch: 35, bearing: 0 },
+    );
+  }
+}

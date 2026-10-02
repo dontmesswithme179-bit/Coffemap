@@ -1,0 +1,10 @@
+{
+  "name": "CoffeMap",
+  "short_name": "CoffeMap",
+  "description": "Rate coffee across Israel. Part the clouds, raise a building.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#3b2418",
+  "theme_color": "#3b2418",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

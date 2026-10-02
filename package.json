@@ -1,0 +1,31 @@
+{
+  "name": "coffemap",
+  "version": "1.0.0",
+  "description": "Coffee map of Israel - rate coffee places, reveal 3D buildings through the clouds",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dontmesswithme179-bit/Coffemap.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/dontmesswithme179-bit/Coffemap/issues"
+  },
+  "homepage": "https://github.com/dontmesswithme179-bit/Coffemap#readme",
+  "dependencies": {
+    "maplibre-gl": "^6.11.2"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vite": "^8.3.2"
+  },
+  "private": true,
+  "type": "module"
+}
