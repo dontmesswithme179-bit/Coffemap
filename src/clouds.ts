@@ -76,7 +76,7 @@ void main() {
   float detail = fbm(p * 3.1 - drift * 1.8);
 
   float density = smoothstep(0.28, 0.78, n);
-  float alpha = mix(0.86, 1.0, density);
+  float alpha = mix(0.76, 0.98, density);
 
   // Light from the top-left: brighter puffs, bluish-grey valleys.
   float shade = clamp(n * 1.15 + detail * 0.25 - 0.1, 0.0, 1.0);

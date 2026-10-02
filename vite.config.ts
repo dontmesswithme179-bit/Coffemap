@@ -7,5 +7,5 @@ export default defineConfig({
   optimizeDeps: { exclude: ['maplibre-gl'] },
   // MapLibre's worker is an ES module worker.
   worker: { format: 'es' },
-  build: { chunkSizeWarningLimit: 1500 },
+  build: { chunkSizeWarningLimit: 2000 },
 });

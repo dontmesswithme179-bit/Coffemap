@@ -2,14 +2,17 @@ import { Map as MLMap, NavigationControl, setRTLTextPlugin, setWorkerUrl, type G
 import 'maplibre-gl/dist/maplibre-gl.css';
 // MapLibre locates its worker relative to its own module URL, which bundling breaks, so bundle it explicitly.
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
-import type { FeatureCollection, Polygon, Point } from 'geojson';
+import type { FeatureCollection, Point } from 'geojson';
 import { avgRating, type Place } from './store';
 import { Clouds, type Hole } from './clouds';
+import { CafeLayer } from './cafe-layer';
 
 export const ISRAEL_BOUNDS: [[number, number], [number, number]] = [[34.2, 29.45], [35.95, 33.35]];
 const MAX_BOUNDS: [[number, number], [number, number]] = [[32.6, 28.6], [37.6, 34.2]];
 const STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty';
-const REVEAL_METERS = 160;
+/** Free global elevation tiles (AWS Open Data / Mapzen Terrarium) for hillshading. */
+const DEM_TILES = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
+const REVEAL_METERS = 230;
 const REVEAL_MIN_PX = 34;
 const GROW_MS = 1400;
 const REVEAL_MS = 1800;
@@ -33,22 +36,6 @@ const colorExpr = (prop: string) => [
   ...RATING_COLORS.flatMap(([r, c]) => [r, c]),
 ];
 
-function square(lng: number, lat: number, halfMeters: number): Polygon {
-  const dLat = halfMeters / 111_320;
-  const dLng = halfMeters / (111_320 * Math.cos((lat * Math.PI) / 180));
-  return {
-    type: 'Polygon',
-    coordinates: [[
-      [lng - dLng, lat - dLat], [lng + dLng, lat - dLat],
-      [lng + dLng, lat + dLat], [lng - dLng, lat + dLat], [lng - dLng, lat - dLat],
-    ]],
-  };
-}
-
-const easeOutBack = (t: number) => {
-  const c1 = 1.4, c3 = c1 + 1;
-  return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
-};
 const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
 const clamp01 = (t: number) => Math.max(0, Math.min(1, t));
 
@@ -66,6 +53,7 @@ export class CoffeeMap {
   private loaded = false;
   private animating = false;
   readonly clouds: Clouds;
+  private cafes = new CafeLayer((id) => this.progress(id, GROW_MS));
 
   constructor(container: HTMLElement, private events: CoffeeMapEvents) {
     setWorkerUrl(workerUrl);
@@ -87,23 +75,78 @@ export class CoffeeMap {
 
     this.map.on('load', () => this.onLoad());
     this.map.on('click', (e) => {
-      const hit = this.map.queryRenderedFeatures(e.point, { layers: ['place-tower', 'place-crown', 'place-dot'] });
-      const id = hit[0]?.properties?.id;
-      if (id) return this.events.onPlaceClick(String(id));
+      const id = this.placeAt(e.point.x, e.point.y);
+      if (id) return this.events.onPlaceClick(id);
       this.events.onMapClick(e.lngLat.lng, e.lngLat.lat, this.poiNameAt(e.point.x, e.point.y));
     });
-    for (const layer of ['place-tower', 'place-crown', 'place-dot']) {
-      this.map.on('mouseenter', layer, () => (this.map.getCanvas().style.cursor = 'pointer'));
-      this.map.on('mouseleave', layer, () => (this.map.getCanvas().style.cursor = ''));
+    this.map.on('mousemove', (e) => {
+      this.map.getCanvas().style.cursor = this.placeAt(e.point.x, e.point.y) ? 'pointer' : '';
+    });
+  }
+
+  private placeAt(x: number, y: number): string | null {
+    if (!this.loaded) return null;
+    const cafe = this.cafes.hitTest(x, y);
+    if (cafe) return cafe;
+    const hit = this.map.queryRenderedFeatures([x, y], { layers: ['place-dot'] });
+    return hit[0]?.properties?.id ? String(hit[0].properties.id) : null;
+  }
+
+  /** Extra detail on top of the base style: terrain shading, sky/haze, softer real buildings. */
+  private enhanceStyle() {
+    const map = this.map;
+    const layers = map.getStyle().layers ?? [];
+    map.addSource('dem', {
+      type: 'raster-dem',
+      tiles: [DEM_TILES],
+      encoding: 'terrarium',
+      tileSize: 256,
+      maxzoom: 14,
+      attribution: 'Terrain: <a href="https://registry.opendata.aws/terrain-tiles/">Mapzen / AWS</a>',
+    });
+    // Draw hills under roads, water and labels so they stay crisp.
+    const before = layers.find((l) => /water|road|highway|tunnel|bridge|building|boundary/.test(l.id) && l.type !== 'background')?.id;
+    map.addLayer({
+      id: 'hillshade',
+      type: 'hillshade',
+      source: 'dem',
+      paint: {
+        'hillshade-exaggeration': ['interpolate', ['linear'], ['zoom'], 6, 0.45, 12, 0.3, 15, 0.12],
+        'hillshade-shadow-color': '#6b5444',
+        'hillshade-highlight-color': '#fff8ea',
+        'hillshade-accent-color': '#8a6f5c',
+        'hillshade-illumination-anchor': 'map',
+      },
+    }, before);
+
+    // Real OSM buildings: warm, slightly translucent, so a café inside one stays visible.
+    for (const l of layers) {
+      if (l.type !== 'fill-extrusion') continue;
+      map.setPaintProperty(l.id, 'fill-extrusion-color', ['interpolate', ['linear'], ['zoom'], 14, '#e9dfd2', 17, '#efe6da']);
+      map.setPaintProperty(l.id, 'fill-extrusion-opacity', 0.62);
     }
+
+    map.setSky({
+      'sky-color': '#a9cdea',
+      'horizon-color': '#f6e9d6',
+      'fog-color': '#f1e7da',
+      'sky-horizon-blend': 0.7,
+      'horizon-fog-blend': 0.6,
+      'fog-ground-blend': 0.35,
+      'atmosphere-blend': 0,
+    });
   }
 
   private onLoad() {
     const map = this.map;
-    map.setLight({ anchor: 'viewport', color: '#fff6e8', intensity: 0.45, position: [1.3, 210, 40] });
+    map.setLight({ anchor: 'viewport', color: '#fff6e8', intensity: 0.4, position: [1.3, 210, 40] });
+    try {
+      this.enhanceStyle();
+    } catch (err) {
+      console.warn('Style enhancements skipped', err);
+    }
 
     const empty: FeatureCollection = { type: 'FeatureCollection', features: [] };
-    map.addSource('places-poly', { type: 'geojson', data: empty });
     map.addSource('places-pt', { type: 'geojson', data: empty });
 
     map.addLayer({
@@ -132,33 +175,6 @@ export class CoffeeMap {
       },
     });
     map.addLayer({
-      id: 'place-tower',
-      type: 'fill-extrusion',
-      source: 'places-poly',
-      filter: ['==', ['get', 'part'], 'tower'],
-      minzoom: 12,
-      paint: {
-        'fill-extrusion-color': colorExpr('rating') as never,
-        'fill-extrusion-height': ['get', 'height'],
-        'fill-extrusion-base': ['get', 'base'],
-        'fill-extrusion-opacity': 0.95,
-        'fill-extrusion-vertical-gradient': true,
-      },
-    });
-    map.addLayer({
-      id: 'place-crown',
-      type: 'fill-extrusion',
-      source: 'places-poly',
-      filter: ['==', ['get', 'part'], 'crown'],
-      minzoom: 12,
-      paint: {
-        'fill-extrusion-color': '#fff3dc',
-        'fill-extrusion-height': ['get', 'height'],
-        'fill-extrusion-base': ['get', 'base'],
-        'fill-extrusion-opacity': 0.95,
-      },
-    });
-    map.addLayer({
       id: 'place-label',
       type: 'symbol',
       source: 'places-pt',
@@ -174,11 +190,14 @@ export class CoffeeMap {
         'text-color': '#3b2418',
         'text-halo-color': '#fffaf2',
         'text-halo-width': 1.6,
-        'text-opacity': ['get', 'grow'],
+        // The 3D café carries its own name sign once you're close.
+        'text-opacity': ['interpolate', ['linear'], ['zoom'], 15.5, ['get', 'grow'], 16.5, 0],
       },
     });
+    map.addLayer(this.cafes);
 
     this.loaded = true;
+    this.syncCafes();
     this.render();
   }
 
@@ -199,13 +218,23 @@ export class CoffeeMap {
       if (!this.appearAt.has(p.id)) this.appearAt.set(p.id, now + (opts.stagger ? 600 + i * 140 : 0));
     });
     this.places = places;
+    this.syncCafes();
     this.render();
+  }
+
+  private syncCafes() {
+    if (!this.loaded) return;
+    this.cafes.setCafes(this.places.map((p) => {
+      const rating = avgRating(p);
+      return { id: p.id, name: p.name, rating, accent: ratingColor(rating), lng: p.lng, lat: p.lat };
+    }));
   }
 
   /** Restart the grow animation for one place (e.g. after rating it again). */
   bump(id: string) {
     this.appearAt.set(id, performance.now());
     this.render();
+    this.map.triggerRepaint();
   }
 
   setPickPoint(p: { lng: number; lat: number } | null) {
@@ -219,7 +248,6 @@ export class CoffeeMap {
 
   private render = () => {
     if (!this.loaded) return;
-    const polys: FeatureCollection<Polygon> = { type: 'FeatureCollection', features: [] };
     const pts: FeatureCollection<Point> = { type: 'FeatureCollection', features: [] };
     let pending = false;
 
@@ -227,13 +255,7 @@ export class CoffeeMap {
       const rating = avgRating(p);
       const raw = this.progress(p.id, GROW_MS);
       if (raw < 1) pending = true;
-      const grow = raw <= 0 ? 0 : easeOutBack(raw);
-      const towerH = (18 + rating * 24) * grow;
       const props = { id: p.id, rating };
-      polys.features.push(
-        { type: 'Feature', geometry: square(p.lng, p.lat, 13), properties: { ...props, part: 'tower', base: 0, height: towerH } },
-        { type: 'Feature', geometry: square(p.lng, p.lat, 8), properties: { ...props, part: 'crown', base: towerH, height: towerH + 7 * grow } },
-      );
       pts.features.push({
         type: 'Feature',
         geometry: { type: 'Point', coordinates: [p.lng, p.lat] },
@@ -246,7 +268,6 @@ export class CoffeeMap {
       });
     }
 
-    (this.map.getSource('places-poly') as GeoJSONSource | undefined)?.setData(polys);
     (this.map.getSource('places-pt') as GeoJSONSource | undefined)?.setData(pts);
 
     if (pending && !this.animating) {
@@ -279,8 +300,8 @@ export class CoffeeMap {
     return out;
   }
 
-  flyTo(center: LngLatLike, zoom = 16.3) {
-    this.map.flyTo({ center, zoom, pitch: 58, bearing: -20, speed: 1.4, essential: true });
+  flyTo(center: LngLatLike, zoom = 17.2) {
+    this.map.flyTo({ center, zoom, pitch: 60, bearing: -18, speed: 1.4, essential: true });
   }
 
   showAll() {
