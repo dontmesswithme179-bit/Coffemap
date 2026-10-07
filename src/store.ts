@@ -13,7 +13,18 @@ export interface Place {
   visits: Visit[];
 }
 
+/** A place you want to try but haven't rated yet. */
+export interface Wish {
+  id: string;
+  name: string;
+  lng: number;
+  lat: number;
+  note: string;
+  addedAt: string; // ISO timestamp
+}
+
 const KEY = 'coffemap.places.v1';
+const WISH_KEY = 'coffemap.wishes.v1';
 
 type Listener = (places: Place[]) => void;
 
@@ -37,19 +48,25 @@ function isPlace(x: unknown): x is Place {
   );
 }
 
-class Store {
-  private places: Place[] = [];
-  private listeners = new Set<Listener>();
+function isWish(x: unknown): x is Wish {
+  const w = x as Wish;
+  return !!w && typeof w.id === 'string' && typeof w.name === 'string' && Number.isFinite(w.lng) && Number.isFinite(w.lat);
+}
 
-  constructor() {
-    try {
-      const raw = localStorage.getItem(KEY);
-      const parsed = raw ? JSON.parse(raw) : [];
-      if (Array.isArray(parsed)) this.places = parsed.filter(isPlace);
-    } catch {
-      this.places = [];
-    }
+function load<T>(key: string, guard: (x: unknown) => x is T): T[] {
+  try {
+    const raw = localStorage.getItem(key);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter(guard) : [];
+  } catch {
+    return [];
   }
+}
+
+class Store {
+  private places: Place[] = load(KEY, isPlace);
+  private wishes: Wish[] = load(WISH_KEY, isWish).map((w) => ({ ...w, note: w.note ?? '', addedAt: w.addedAt ?? new Date().toISOString() }));
+  private listeners = new Set<Listener>();
 
   all(): Place[] {
     return this.places;
@@ -64,9 +81,35 @@ class Store {
     return () => this.listeners.delete(fn);
   }
 
+  wishList(): Wish[] {
+    return this.wishes;
+  }
+
+  getWish(id: string): Wish | undefined {
+    return this.wishes.find((w) => w.id === id);
+  }
+
+  addWish(name: string, lng: number, lat: number, note: string): Wish {
+    const wish: Wish = { id: uid(), name, lng, lat, note, addedAt: new Date().toISOString() };
+    this.wishes = [...this.wishes, wish];
+    this.commit();
+    return wish;
+  }
+
+  updateWish(id: string, patch: Partial<Pick<Wish, 'name' | 'note'>>) {
+    this.wishes = this.wishes.map((w) => (w.id === id ? { ...w, ...patch } : w));
+    this.commit();
+  }
+
+  deleteWish(id: string) {
+    this.wishes = this.wishes.filter((w) => w.id !== id);
+    this.commit();
+  }
+
   private commit() {
     try {
       localStorage.setItem(KEY, JSON.stringify(this.places));
+      localStorage.setItem(WISH_KEY, JSON.stringify(this.wishes));
     } catch {
       // Storage full or unavailable - keep working in memory.
     }
@@ -105,20 +148,25 @@ class Store {
   }
 
   exportJSON(): string {
-    return JSON.stringify({ app: 'coffemap', version: 1, places: this.places }, null, 2);
+    return JSON.stringify({ app: 'coffemap', version: 2, places: this.places, wishes: this.wishes }, null, 2);
   }
 
-  /** Merges imported places; places with an existing id are replaced. Returns the count imported. */
-  importJSON(text: string): number {
+  /** Merges imported places and wishes; items with an existing id are replaced. Returns the counts imported. */
+  importJSON(text: string): { places: number; wishes: number } {
     const data = JSON.parse(text);
     const incoming: unknown[] = Array.isArray(data) ? data : data?.places;
+    const incomingWishes: unknown[] = Array.isArray(data?.wishes) ? data.wishes : [];
     if (!Array.isArray(incoming)) throw new Error('No places found in file');
     const valid = incoming.filter(isPlace);
     const byId = new Map(this.places.map((p) => [p.id, p]));
     valid.forEach((p) => byId.set(p.id, p));
     this.places = [...byId.values()];
+    const validWishes = incomingWishes.filter(isWish).map((w) => ({ ...w, note: w.note ?? '', addedAt: w.addedAt ?? new Date().toISOString() }));
+    const wishById = new Map(this.wishes.map((w) => [w.id, w]));
+    validWishes.forEach((w) => wishById.set(w.id, w));
+    this.wishes = [...wishById.values()];
     this.commit();
-    return valid.length;
+    return { places: valid.length, wishes: validWishes.length };
   }
 }
 

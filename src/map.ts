@@ -1,9 +1,9 @@
-import { Map as MLMap, NavigationControl, setRTLTextPlugin, setWorkerUrl, type GeoJSONSource, type LngLatLike } from 'maplibre-gl';
+import { Map as MLMap, Marker, NavigationControl, setRTLTextPlugin, setWorkerUrl, type GeoJSONSource, type LngLatLike } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 // MapLibre locates its worker relative to its own module URL, which bundling breaks, so bundle it explicitly.
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import type { FeatureCollection, Point } from 'geojson';
-import { avgRating, type Place } from './store';
+import { avgRating, type Place, type Wish } from './store';
 import { Clouds, type Hole } from './clouds';
 import { CafeLayer } from './cafe-layer';
 
@@ -42,6 +42,7 @@ const clamp01 = (t: number) => Math.max(0, Math.min(1, t));
 export interface CoffeeMapEvents {
   onPlaceClick: (id: string) => void;
   onMapClick: (lng: number, lat: number, suggestedName: string | null) => void;
+  onWishClick: (id: string) => void;
 }
 
 export class CoffeeMap {
@@ -54,6 +55,7 @@ export class CoffeeMap {
   private animating = false;
   readonly clouds: Clouds;
   private cafes = new CafeLayer((id) => this.progress(id, GROW_MS));
+  private wishMarkers = new Map<string, { marker: Marker; label: HTMLElement }>();
 
   constructor(container: HTMLElement, private events: CoffeeMapEvents) {
     setWorkerUrl(workerUrl);
@@ -79,6 +81,10 @@ export class CoffeeMap {
       if (id) return this.events.onPlaceClick(id);
       this.events.onMapClick(e.lngLat.lng, e.lngLat.lat, this.poiNameAt(e.point.x, e.point.y));
     });
+    // Wish-list pins show their names once you're zoomed in enough for them not to clutter.
+    const syncWishLabels = () => container.classList.toggle('show-wish-labels', this.map.getZoom() >= 12.5);
+    this.map.on('zoom', syncWishLabels);
+    syncWishLabels();
     this.map.on('mousemove', (e) => {
       this.map.getCanvas().style.cursor = this.placeAt(e.point.x, e.point.y) ? 'pointer' : '';
     });
@@ -230,6 +236,47 @@ export class CoffeeMap {
     }));
   }
 
+  /**
+   * Wish-list pins are DOM markers, so they sit above the clouds and stay visible at every zoom.
+   */
+  setWishes(wishes: Wish[]) {
+    const seen = new Set<string>();
+    for (const w of wishes) {
+      seen.add(w.id);
+      const existing = this.wishMarkers.get(w.id);
+      if (existing) {
+        existing.marker.setLngLat([w.lng, w.lat]);
+        existing.label.textContent = w.name;
+        continue;
+      }
+      const el = document.createElement('button');
+      el.type = 'button';
+      el.className = 'wish-pin';
+      el.setAttribute('aria-label', `Wish list: ${w.name}`);
+      const bubble = document.createElement('span');
+      bubble.className = 'wish-pin__bubble';
+      const heart = document.createElement('i');
+      heart.textContent = '♥';
+      bubble.append(heart);
+      const label = document.createElement('span');
+      label.className = 'wish-pin__label';
+      label.textContent = w.name;
+      el.append(bubble, label);
+      el.style.setProperty('--delay', `${(this.wishMarkers.size % 7) * -0.4}s`);
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.events.onWishClick(w.id);
+      });
+      const marker = new Marker({ element: el, anchor: 'bottom' }).setLngLat([w.lng, w.lat]).addTo(this.map);
+      this.wishMarkers.set(w.id, { marker, label });
+    }
+    for (const [id, m] of this.wishMarkers) {
+      if (seen.has(id)) continue;
+      m.marker.remove();
+      this.wishMarkers.delete(id);
+    }
+  }
+
   /** Restart the grow animation for one place (e.g. after rating it again). */
   bump(id: string) {
     this.appearAt.set(id, performance.now());
@@ -282,7 +329,12 @@ export class CoffeeMap {
   private cloudView() {
     const anchor = this.map.project([35, 31.5]);
     const z = this.map.getZoom();
-    return { anchorX: anchor.x, anchorY: anchor.y, scale: 260 * Math.pow(2, (z - 8) * 0.35) };
+    return {
+      anchorX: anchor.x,
+      anchorY: anchor.y,
+      scale: 260 * Math.pow(2, (z - 8) * 0.35),
+      cloudScale: 300 * Math.pow(2, (z - 8) * 0.12),
+    };
   }
 
   private holePx(lng: number, lat: number, meters: number) {

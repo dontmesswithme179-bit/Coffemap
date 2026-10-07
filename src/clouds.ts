@@ -15,8 +15,10 @@ export interface CloudView {
   /** Screen position (CSS px) of a fixed geographic anchor, so clouds move with the map. */
   anchorX: number;
   anchorY: number;
-  /** Size of one noise unit in CSS px. */
+  /** Size of one fog noise unit in CSS px. */
   scale: number;
+  /** Size of one drifting-cloud noise unit in CSS px (kept closer to screen size than the fog). */
+  cloudScale: number;
 }
 
 const VERT = `#version 300 es
@@ -34,6 +36,7 @@ out vec4 outColor;
 uniform vec2 uRes;
 uniform vec2 uAnchor;
 uniform float uScale;
+uniform float uCloudScale;
 uniform float uTime;
 uniform float uOpacity;
 uniform sampler2D uMask;
@@ -64,6 +67,30 @@ float fbm(vec2 p) {
   return v;
 }
 
+// Cheaper 4-octave fbm for the drifting cloud layer.
+float fbm4(vec2 p) {
+  float v = 0.0;
+  float a = 0.5;
+  mat2 rot = mat2(0.8, 0.6, -0.6, 0.8);
+  for (int i = 0; i < 4; i++) {
+    v += a * noise(p);
+    p = rot * p * 2.07 + 31.7;
+    a *= 0.5;
+  }
+  return v;
+}
+
+/** Density of the puffy cumulus clouds that sail across on the wind. */
+float cumulus(vec2 c) {
+  vec2 w = vec2(fbm4(c * 1.6 + 3.1), fbm4(c * 1.6 - 1.7));
+  float base = fbm4(c + 0.55 * w);
+  // Fine billows on the edges.
+  float billow = fbm4(c * 4.3 + w * 2.0);
+  return base + (billow - 0.5) * 0.2;
+}
+
+vec4 over(vec4 src, vec4 dst) { return src + dst * (1.0 - src.a); }
+
 void main() {
   vec2 frag = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y); // y-down, like CSS
   vec2 p = (frag - uAnchor) / uScale;
@@ -80,8 +107,9 @@ void main() {
 
   // Light from the top-left: brighter puffs, bluish-grey valleys.
   float shade = clamp(n * 1.15 + detail * 0.25 - 0.1, 0.0, 1.0);
-  vec3 shadow = vec3(0.66, 0.71, 0.80);
-  vec3 lit = vec3(0.995, 0.985, 0.97);
+  // The fog sits a little lower and cooler than the bright cumulus above it.
+  vec3 shadow = vec3(0.60, 0.65, 0.74);
+  vec3 lit = vec3(0.90, 0.915, 0.94);
   vec3 col = mix(shadow, lit, shade);
 
   // Revealed holes, with cloudy wisps eating into the edge.
@@ -91,8 +119,27 @@ void main() {
   // Faint golden glow around revealed places.
   col = mix(col, vec3(1.0, 0.86, 0.62), smoothstep(0.0, 0.6, m) * (1.0 - hole) * 0.45);
 
-  alpha *= uOpacity;
-  outColor = vec4(col * alpha, alpha);
+  vec4 fog = vec4(col * alpha, alpha);
+
+  // --- Drifting cumulus clouds above the fog, with shadows on whatever is below.
+  vec2 wind = vec2(t * 0.045, -t * 0.012);
+  vec2 c = (frag - uAnchor) / uCloudScale + wind;
+  float d = cumulus(c);
+  float cloud = smoothstep(0.55, 0.61, d);
+  // Light comes from the top-left: sample "towards the sun" to shade the undersides.
+  float towardSun = cumulus(c + vec2(-0.05, -0.08));
+  float lightK = clamp(0.85 + (d - towardSun) * -6.0, 0.0, 1.0);
+  // Bluish-grey on the side away from the sun; sunlit, warm-white tops in the thick middle.
+  float core = smoothstep(0.56, 0.72, d);
+  vec3 cloudCol = mix(vec3(0.76, 0.80, 0.89), vec3(1.0, 0.995, 0.98), clamp(lightK * 0.7 + core * 0.45, 0.0, 1.0));
+  // Thinner over revealed places so cafés stay visible as clouds pass.
+  float cloudA = cloud * mix(0.97, 0.55, hole);
+  // Shadow cast down-right onto the fog and the map.
+  float sh = smoothstep(0.53, 0.63, cumulus(c + vec2(0.12, 0.2)));
+  float shadowA = sh * (1.0 - cloud) * mix(0.16, 0.26, hole);
+
+  vec4 outc = over(vec4(cloudCol * cloudA, cloudA), over(vec4(vec3(0.12, 0.10, 0.16) * shadowA, shadowA), fog));
+  outColor = outc * uOpacity;
 }`;
 
 function compile(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader {
@@ -157,7 +204,7 @@ export class Clouds {
       throw new Error(gl.getProgramInfoLog(prog) ?? 'program link failed');
     }
     this.program = prog;
-    for (const u of ['uRes', 'uAnchor', 'uScale', 'uTime', 'uOpacity', 'uMask']) {
+    for (const u of ['uRes', 'uAnchor', 'uScale', 'uCloudScale', 'uTime', 'uOpacity', 'uMask']) {
       this.uniforms[u] = gl.getUniformLocation(prog, u);
     }
 
@@ -237,6 +284,7 @@ export class Clouds {
     gl.uniform2f(u.uRes, this.canvas.width, this.canvas.height);
     gl.uniform2f(u.uAnchor, v.anchorX * sx, v.anchorY * sx);
     gl.uniform1f(u.uScale, v.scale * sx);
+    gl.uniform1f(u.uCloudScale, v.cloudScale * sx);
     gl.uniform1f(u.uTime, ((performance.now() - this.start) / 1000) * this.speed);
     gl.uniform1f(u.uOpacity, this.opacity);
     gl.uniform1i(u.uMask, 0);

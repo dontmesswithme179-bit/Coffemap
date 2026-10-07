@@ -1,13 +1,17 @@
 import { Marker } from 'maplibre-gl';
 import './style.css';
-import { avgRating, lastVisit, store, type Place } from './store';
+import { avgRating, lastVisit, store, type Place, type Wish } from './store';
 import { CoffeeMap, ratingColor } from './map';
 import { searchPlaces, type SearchResult } from './search';
+
+/** Rating a coffee you drank, or saving a place to try later. */
+type Mode = 'rate' | 'wish';
 
 type View =
   | { kind: 'list' }
   | { kind: 'place'; id: string }
-  | { kind: 'form'; placeId?: string; lng: number; lat: number; name: string };
+  | { kind: 'wish'; id: string }
+  | { kind: 'form'; mode: Mode; placeId?: string; wishId?: string; lng: number; lat: number; name: string; note?: string };
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string) => document.querySelector(sel) as T;
 
@@ -56,6 +60,8 @@ function toast(msg: string) {
 const panel = $('#panel');
 let view: View = { kind: 'list' };
 let picking = false;
+let pickMode: Mode = 'rate';
+let listTab: 'rated' | 'wishes' = 'rated';
 let pickMarker: Marker | null = null;
 
 const cmap = new CoffeeMap($('#map'), {
@@ -64,8 +70,12 @@ const cmap = new CoffeeMap($('#map'), {
     setView({ kind: 'place', id });
   },
   onMapClick: (lng, lat, name) => {
-    if (picking || view.kind === 'form') return choosePoint(lng, lat, name ?? '');
-    if (view.kind !== 'list') setView({ kind: 'list' });
+    if (picking || (view.kind === 'form' && !view.placeId && !view.wishId)) return choosePoint(lng, lat, name ?? '');
+    if (view.kind !== 'list' && view.kind !== 'form') setView({ kind: 'list' });
+  },
+  onWishClick: (id) => {
+    if (picking) return;
+    setView({ kind: 'wish', id });
   },
 });
 
@@ -78,15 +88,18 @@ function updateStats() {
   const places = store.all();
   const cups = places.reduce((s, p) => s + p.visits.length, 0);
   const avg = cups ? places.reduce((s, p) => s + p.visits.reduce((a, v) => a + v.rating, 0), 0) / cups : 0;
-  $('#stats').textContent = cups
+  const wishes = store.wishList().length;
+  $('#stats').textContent = (cups
     ? `${places.length} ${places.length === 1 ? 'place' : 'places'} · ${cups} ${cups === 1 ? 'cup' : 'cups'} · avg ★ ${avg.toFixed(1)}`
-    : 'No cups rated yet';
+    : 'No cups rated yet') + (wishes ? ` · ♥ ${wishes}` : '');
 }
 
 // --- Picking a location ------------------------------------------------------
 
-function startPicking() {
+function startPicking(mode: Mode = 'rate') {
   picking = true;
+  pickMode = mode;
+  $('#pick-text').textContent = mode === 'wish' ? 'Tap the place you want to try' : 'Tap the map where you had your coffee';
   document.body.classList.add('is-picking');
   $('#pick-banner').hidden = false;
   cmap.clouds.setOpacity(0.25);
@@ -107,8 +120,9 @@ function clearPickMarker() {
 }
 
 function choosePoint(lng: number, lat: number, name: string) {
-  // A tap close to an existing place means "another cup here".
-  const near = store.all().find((p) => {
+  const mode: Mode = view.kind === 'form' ? view.mode : pickMode;
+  // When rating, a tap close to an existing place means "another cup here".
+  const near = mode === 'wish' ? undefined : store.all().find((p) => {
     const a = cmap.map.project([p.lng, p.lat]);
     const b = cmap.map.project([lng, lat]);
     return Math.hypot(a.x - b.x, a.y - b.y) < 24;
@@ -116,7 +130,7 @@ function choosePoint(lng: number, lat: number, name: string) {
   stopPicking();
   if (near) {
     clearPickMarker();
-    return setView({ kind: 'form', placeId: near.id, lng: near.lng, lat: near.lat, name: near.name });
+    return setView({ kind: 'form', mode: 'rate', placeId: near.id, lng: near.lng, lat: near.lat, name: near.name });
   }
   if (!pickMarker) {
     pickMarker = new Marker({ color: '#3b2418', draggable: true }).setLngLat([lng, lat]).addTo(cmap.map);
@@ -131,7 +145,7 @@ function choosePoint(lng: number, lat: number, name: string) {
   cmap.setPickPoint({ lng, lat });
   cmap.clouds.setOpacity(0.55);
   const prevName = view.kind === 'form' && !view.placeId ? (panel.querySelector('#f-name') as HTMLInputElement)?.value : '';
-  setView({ kind: 'form', lng, lat, name: name || prevName || '' });
+  setView({ kind: 'form', mode, lng, lat, name: name || prevName || '' });
 }
 
 function locateMe() {
@@ -154,17 +168,32 @@ function render() {
   updateStats();
   panel.replaceChildren();
   panel.dataset.view = view.kind;
-  $('#rate-btn').hidden = view.kind === 'form';
+  $('#fabs').hidden = view.kind === 'form';
   if (view.kind !== 'form') {
     clearPickMarker();
     if (!picking) cmap.clouds.setOpacity(1);
   }
   if (view.kind === 'list') renderList();
   else if (view.kind === 'place') renderPlace(view.id);
+  else if (view.kind === 'wish') renderWish(view.id);
   else renderForm(view);
 }
 
+function renderTabs() {
+  const tab = (id: typeof listTab, label: string) =>
+    h('button', {
+      role: 'tab', 'aria-selected': String(listTab === id),
+      onclick: () => { listTab = id; render(); },
+    }, label);
+  return h('div', { class: 'tabs', role: 'tablist' },
+    tab('rated', `☕ Rated (${store.all().length})`),
+    tab('wishes', `♥ Wish list (${store.wishList().length})`),
+  );
+}
+
 function renderList() {
+  panel.append(renderTabs());
+  if (listTab === 'wishes') return renderWishList();
   const places = [...store.all()].sort((a, b) => avgRating(b) - avgRating(a));
   if (!places.length) {
     panel.append(
@@ -172,7 +201,7 @@ function renderList() {
         h('div', { class: 'empty__art', 'aria-hidden': 'true' }, '☁️☕☁️'),
         h('h2', {}, 'Israel is still under the clouds'),
         h('p', {}, 'Every coffee you rate parts the clouds and raises a building where you drank it. Better coffee, taller tower.'),
-        h('button', { class: 'btn btn--primary', onclick: startPicking }, 'Rate your first coffee'),
+        h('button', { class: 'btn btn--primary', onclick: () => startPicking('rate') }, 'Rate your first coffee'),
       ),
     );
     return;
@@ -208,6 +237,82 @@ function renderList() {
   );
 }
 
+function renderWishList() {
+  const wishes = [...store.wishList()].sort((a, b) => b.addedAt.localeCompare(a.addedAt));
+  if (!wishes.length) {
+    panel.append(
+      h('div', { class: 'empty' },
+        h('div', { class: 'empty__art', 'aria-hidden': 'true' }, '♥'),
+        h('h2', {}, 'Places you want to try'),
+        h('p', {}, 'Heard about a great café? Pin it to your wish list. It stays on the map above the clouds until you go and rate it.'),
+        h('button', { class: 'btn btn--wish', onclick: () => startPicking('wish') }, 'Add a place'),
+      ),
+    );
+    return;
+  }
+  panel.append(
+    h('ul', { class: 'place-list' },
+      ...wishes.map((w) =>
+        h('li', {},
+          h('button', {
+            class: 'place-item',
+            onclick: () => {
+              setView({ kind: 'wish', id: w.id });
+              cmap.flyTo([w.lng, w.lat]);
+            },
+          },
+            h('span', { class: 'place-item__badge place-item__badge--wish', 'aria-hidden': 'true' }, '♥'),
+            h('span', { class: 'place-item__body' },
+              h('strong', {}, w.name),
+              h('small', {}, w.note ? w.note.slice(0, 60) : `Added ${fmtDate(w.addedAt)}`),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+function renderWish(id: string) {
+  const w = store.getWish(id);
+  if (!w) return setView({ kind: 'list' });
+  panel.append(
+    h('div', { class: 'panel__head' },
+      h('button', { class: 'icon-btn', 'aria-label': 'Back', onclick: () => { listTab = 'wishes'; setView({ kind: 'list' }); } }, '←'),
+      h('h2', { class: 'grow' }, w.name),
+      h('button', {
+        class: 'icon-btn', 'aria-label': 'Edit', title: 'Edit',
+        onclick: () => {
+          const name = prompt('Place name', w.name)?.trim();
+          if (!name) return;
+          const note = prompt('Note', w.note);
+          store.updateWish(w.id, { name, note: note === null ? w.note : note.trim() });
+        },
+      }, '✎'),
+    ),
+    h('div', { class: 'wish-card' },
+      h('small', {}, `♥ On your wish list since ${fmtDate(w.addedAt)}`),
+      w.note ? h('p', {}, w.note) : null,
+    ),
+    h('div', { class: 'row' },
+      h('button', {
+        class: 'btn btn--primary grow',
+        onclick: () => setView({ kind: 'form', mode: 'rate', wishId: w.id, lng: w.lng, lat: w.lat, name: w.name }),
+      }, '☕ Drank here — rate it'),
+      h('button', { class: 'btn btn--ghost', onclick: () => cmap.flyTo([w.lng, w.lat]) }, 'Fly there'),
+    ),
+    h('button', {
+      class: 'btn btn--danger btn--sm',
+      onclick: () => {
+        if (!confirm(`Remove “${w.name}” from your wish list?`)) return;
+        store.deleteWish(w.id);
+        listTab = 'wishes';
+        setView({ kind: 'list' });
+      },
+    }, 'Remove from wish list'),
+  );
+}
+
 function renderPlace(id: string) {
   const p = store.get(id);
   if (!p) return setView({ kind: 'list' });
@@ -232,7 +337,7 @@ function renderPlace(id: string) {
       h('span', { class: 'score__meta' }, `${p.visits.length} ${p.visits.length === 1 ? 'cup' : 'cups'} here`),
     ),
     h('div', { class: 'row' },
-      h('button', { class: 'btn btn--primary', onclick: () => setView({ kind: 'form', placeId: p.id, lng: p.lng, lat: p.lat, name: p.name }) }, '＋ Another cup'),
+      h('button', { class: 'btn btn--primary', onclick: () => setView({ kind: 'form', mode: 'rate', placeId: p.id, lng: p.lng, lat: p.lat, name: p.name }) }, '＋ Another cup'),
       h('button', { class: 'btn btn--ghost', onclick: () => cmap.flyTo([p.lng, p.lat]) }, 'Fly there'),
     ),
     h('ul', { class: 'visits' },
@@ -304,6 +409,9 @@ function starInput(initial: number, onChange: (v: number) => void) {
 
 function renderForm(v: Extract<View, { kind: 'form' }>) {
   const existing = v.placeId ? store.get(v.placeId) : undefined;
+  const fromWish: Wish | undefined = v.wishId ? store.getWish(v.wishId) : undefined;
+  const isNew = !existing && !fromWish;
+  if (v.mode === 'wish') return renderWishForm(v);
   let rating = 0;
 
   const name = h('input', { id: 'f-name', type: 'text', required: true, maxlength: '80', placeholder: 'e.g. Cafe Xoho', value: v.name }) as HTMLInputElement;
@@ -311,7 +419,8 @@ function renderForm(v: Extract<View, { kind: 'form' }>) {
   const date = h('input', { id: 'f-date', type: 'date', value: new Date().toISOString().slice(0, 10) }) as HTMLInputElement;
   const error = h('p', { class: 'form__error', hidden: true });
 
-  const cancel = () => setView(existing ? { kind: 'place', id: existing.id } : { kind: 'list' });
+  const cancel = () =>
+    setView(existing ? { kind: 'place', id: existing.id } : fromWish ? { kind: 'wish', id: fromWish.id } : { kind: 'list' });
 
   const form = h('form', {
     class: 'form',
@@ -330,6 +439,8 @@ function renderForm(v: Extract<View, { kind: 'form' }>) {
       } else {
         const cur = view.kind === 'form' ? view : v;
         id = store.addPlace(nm, cur.lng, cur.lat, visit).id;
+        // Tried it - it graduates from the wish list.
+        if (fromWish) store.deleteWish(fromWish.id);
       }
       clearPickMarker();
       setView({ kind: 'place', id });
@@ -342,8 +453,9 @@ function renderForm(v: Extract<View, { kind: 'form' }>) {
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Cancel', onclick: cancel }, '✕'),
       h('h2', { class: 'grow' }, existing ? `Another cup at ${existing.name}` : 'Rate this coffee'),
     ),
+    isNew ? modeTabs(v) : null,
     existing ? null : h('label', { for: 'f-name' }, 'Place', name),
-    existing ? null : h('p', { class: 'hint' }, 'Drag the pin or tap the map to adjust the spot.'),
+    isNew ? h('p', { class: 'hint' }, 'Drag the pin or tap the map to adjust the spot.') : null,
     h('label', {}, 'How tasty was it?', starInput(0, (r) => { rating = r; error.hidden = true; })),
     h('label', { for: 'f-comment' }, 'Notes', comment),
     h('label', { for: 'f-date' }, 'Date', date),
@@ -359,6 +471,63 @@ function renderForm(v: Extract<View, { kind: 'form' }>) {
   }
   panel.append(form);
   if (!existing && !v.name) setTimeout(() => name.focus(), 50);
+}
+
+/** Rate / Wish switch shown when adding a brand-new place. */
+function modeTabs(v: Extract<View, { kind: 'form' }>) {
+  const sw = (mode: Mode, label: string) =>
+    h('button', {
+      type: 'button', role: 'tab', 'aria-selected': String(v.mode === mode),
+      onclick: () => {
+        if (v.mode === mode) return;
+        const nm = (panel.querySelector('#f-name') as HTMLInputElement | null)?.value ?? v.name;
+        const cur = view.kind === 'form' ? view : v;
+        setView({ ...cur, mode, name: nm });
+      },
+    }, label);
+  return h('div', { class: 'tabs', role: 'tablist' }, sw('rate', '☕ I drank here'), sw('wish', '♥ Want to try'));
+}
+
+function renderWishForm(v: Extract<View, { kind: 'form' }>) {
+  const name = h('input', { id: 'f-name', type: 'text', required: true, maxlength: '80', placeholder: 'e.g. Cafe Xoho', value: v.name }) as HTMLInputElement;
+  const note = h('textarea', { id: 'f-note', rows: '3', maxlength: '1000', placeholder: 'Who recommended it? What to order?' }) as HTMLTextAreaElement;
+  note.value = v.note ?? '';
+  const error = h('p', { class: 'form__error', hidden: true });
+  const cancel = () => { clearPickMarker(); setView({ kind: 'list' }); };
+  panel.append(
+    h('form', {
+      class: 'form',
+      onsubmit: (e) => {
+        e.preventDefault();
+        const nm = name.value.trim();
+        if (!nm) {
+          error.textContent = 'Give the place a name';
+          error.hidden = false;
+          return;
+        }
+        const cur = view.kind === 'form' ? view : v;
+        const w = store.addWish(nm, cur.lng, cur.lat, note.value.trim());
+        clearPickMarker();
+        setView({ kind: 'wish', id: w.id });
+        toast('Pinned to your wish list ♥');
+      },
+    },
+      h('div', { class: 'panel__head' },
+        h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Cancel', onclick: cancel }, '✕'),
+        h('h2', { class: 'grow' }, 'Add to wish list'),
+      ),
+      modeTabs(v),
+      h('label', { for: 'f-name' }, 'Place', name),
+      h('p', { class: 'hint' }, 'Drag the pin or tap the map to adjust the spot.'),
+      h('label', { for: 'f-note' }, 'Note', note),
+      error,
+      h('div', { class: 'row' },
+        h('button', { type: 'submit', class: 'btn btn--wish grow' }, '♥ Save to wish list'),
+        h('button', { type: 'button', class: 'btn btn--ghost', onclick: cancel }, 'Cancel'),
+      ),
+    ),
+  );
+  if (!v.name) setTimeout(() => name.focus(), 50);
 }
 
 // --- Search -----------------------------------------------------------------
@@ -426,7 +595,7 @@ $<HTMLInputElement>('#import-file').addEventListener('change', async (e) => {
   if (!file) return;
   try {
     const n = store.importJSON(await file.text());
-    toast(`Imported ${n} ${n === 1 ? 'place' : 'places'}`);
+    toast(`Imported ${n.places} ${n.places === 1 ? 'place' : 'places'}${n.wishes ? ` and ${n.wishes} wish${n.wishes === 1 ? '' : 'es'}` : ''}`);
   } catch (err) {
     toast(`Import failed: ${(err as Error).message}`);
   }
@@ -434,7 +603,8 @@ $<HTMLInputElement>('#import-file').addEventListener('change', async (e) => {
 
 // --- Wiring -------------------------------------------------------------------
 
-$('#rate-btn').addEventListener('click', startPicking);
+$('#rate-btn').addEventListener('click', () => startPicking('rate'));
+$('#wish-btn').addEventListener('click', () => startPicking('wish'));
 $('#pick-cancel').addEventListener('click', () => {
   stopPicking();
   render();
@@ -450,8 +620,10 @@ document.addEventListener('keydown', (e) => {
 
 store.subscribe((places: Place[]) => {
   cmap.setPlaces(places);
+  cmap.setWishes(store.wishList());
   render();
 });
 
 cmap.setPlaces(store.all(), { stagger: true });
+cmap.setWishes(store.wishList());
 render();

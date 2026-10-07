@@ -27,7 +27,7 @@
       <div class="menu">
         <button id="menu-btn" class="icon-btn" aria-label="Menu" aria-haspopup="true">⋯</button>
         <div id="menu" class="menu__list" hidden>
-          <button data-action="export">Export my ratings</button>
+          <button data-action="export">Export ratings &amp; wish list</button>
           <button data-action="import">Import ratings…</button>
           <button data-action="reset-view">Show all of Israel</button>
         </div>
@@ -38,14 +38,19 @@
     <aside id="panel" class="panel" aria-live="polite"></aside>
 
     <div id="pick-banner" class="pick-banner" hidden>
-      <span>Tap the map where you had your coffee</span>
+      <span id="pick-text">Tap the map where you had your coffee</span>
       <button id="locate-btn" class="btn btn--ghost">📍 Use my location</button>
       <button id="pick-cancel" class="btn btn--ghost">Cancel</button>
     </div>
 
-    <button id="rate-btn" class="fab">
-      <span aria-hidden="true">＋</span> Rate a coffee
-    </button>
+    <div id="fabs" class="fabs">
+      <button id="rate-btn" class="fab">
+        <span aria-hidden="true">＋</span> Rate a coffee
+      </button>
+      <button id="wish-btn" class="fab fab--wish" aria-label="Add to wish list">
+        <span aria-hidden="true">♥</span> Wish
+      </button>
+    </div>
 
     <div id="toast" class="toast" role="status" hidden></div>
 
