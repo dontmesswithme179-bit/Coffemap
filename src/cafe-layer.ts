@@ -1,6 +1,10 @@
 import * as THREE from 'three';
 import type { CustomLayerInterface, CustomRenderMethodInput, Map as MLMap } from 'maplibre-gl';
-import { buildCafe, type CafeModel } from './cafe-model';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { buildCafe, buildGlbCafe, type CafeModel } from './cafe-model';
+
+/** Imported café model; the hand-built café is used until it loads, or if it fails to. */
+const CAFE_MODEL_URL = `${import.meta.env.BASE_URL}models/coffee-shop.glb`;
 
 export interface CafeSpec {
   id: string;
@@ -55,6 +59,7 @@ export class CafeLayer implements CustomLayerInterface {
   private entries = new Map<string, Entry>();
   private lastMatrix = new THREE.Matrix4();
   private start = performance.now();
+  private template: THREE.Object3D | null = null;
 
   constructor(private getGrow: (id: string) => number) {
     this.scene.add(new THREE.HemisphereLight(0xfff3df, 0x7d6a58, 2.1));
@@ -71,6 +76,18 @@ export class CafeLayer implements CustomLayerInterface {
     this.renderer = new THREE.WebGLRenderer({ canvas: map.getCanvas(), context: gl, antialias: true });
     this.renderer.autoClear = false;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    new GLTFLoader().load(
+      CAFE_MODEL_URL,
+      (gltf) => {
+        this.template = gltf.scene;
+        // Rebuild every café with the imported model.
+        const specs = [...this.entries.values()].map((e) => e.spec);
+        this.entries.forEach((e) => (e.key = ''));
+        this.setCafes(specs);
+      },
+      undefined,
+      (err) => console.warn('Café model failed to load, using the built-in one', err),
+    );
   }
 
   onRemove() {
@@ -82,7 +99,7 @@ export class CafeLayer implements CustomLayerInterface {
     const seen = new Set<string>();
     for (const spec of cafes) {
       seen.add(spec.id);
-      const key = `${spec.name}|${spec.rating.toFixed(2)}|${spec.accent}`;
+      const key = `${this.template ? 'glb' : 'proc'}|${spec.name}|${spec.rating.toFixed(2)}|${spec.accent}`;
       const prev = this.entries.get(spec.id);
       const { x, y } = toMercator(spec.lng, spec.lat);
       const mPerMerc = 1 / (EARTH_CIRCUMFERENCE * Math.cos((spec.lat * Math.PI) / 180));
@@ -94,7 +111,9 @@ export class CafeLayer implements CustomLayerInterface {
         this.scene.remove(prev.model.root);
         prev.model.dispose();
       }
-      const model = buildCafe(spec.name, spec.rating, spec.accent);
+      const model = this.template
+        ? buildGlbCafe(this.template, spec.name, spec.rating, spec.accent)
+        : buildCafe(spec.name, spec.rating, spec.accent);
       model.root.visible = false;
       this.scene.add(model.root);
       this.entries.set(spec.id, { spec, key, model, mx: x, my: y, mPerMerc });

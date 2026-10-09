@@ -240,7 +240,32 @@ export function buildCafe(name: string, rating: number, accent: string): CafeMod
   cupG.rotation.y = -0.5;
   root.add(cupG);
 
-  // Steam puffs rising from the cup (soft spheres, so they read from any camera angle).
+  const topper = addTopper(root, rating, track, new THREE.Vector3(0, H + 4, -1.5), H + 8.2);
+
+  return {
+    root,
+    height: H + 10,
+    tick: topper,
+    dispose() {
+      disposables.forEach((d) => d.dispose());
+      root.traverse((o) => (o as THREE.Mesh).geometry?.dispose?.());
+    },
+  };
+}
+
+/**
+ * Steam rising from a cup at `steamBase` and a floating ring of gold stars (the rating) at `starsY`.
+ * Shared by the hand-built café and imported models. Returns the per-frame animation function.
+ */
+function addTopper(
+  root: THREE.Group,
+  rating: number,
+  track: <T extends { dispose(): void }>(x: T) => T,
+  steamBase: THREE.Vector3,
+  starsY: number,
+  scale = 1,
+): (t: number) => void {
+  // Steam puffs (soft spheres, so they read from any camera angle).
   const puffGeo = track(new THREE.IcosahedronGeometry(1, 2));
   const puffs: THREE.Mesh<THREE.IcosahedronGeometry, THREE.MeshStandardMaterial>[] = [];
   for (let i = 0; i < 6; i++) {
@@ -249,9 +274,7 @@ export function buildCafe(name: string, rating: number, accent: string): CafeMod
     puffs.push(p);
     root.add(p);
   }
-  const steamBase = new THREE.Vector3(0, H + 4, -1.5);
 
-  // Floating ring of gold stars = the rating.
   const starsG = new THREE.Group();
   const full = Math.round(rating * 2) / 2;
   const goldM = track(mat('#f5b82e', { metalness: 0.5, roughness: 0.3, emissive: '#b97700', emissiveIntensity: 0.35 }));
@@ -274,31 +297,124 @@ export function buildCafe(name: string, rating: number, accent: string): CafeMod
       starsG.add(hs);
     }
   }
-  starsG.position.set(0, H + 8.2, -1.5);
+  starsG.scale.setScalar(scale);
+  starsG.position.set(steamBase.x, starsY, steamBase.z);
   root.add(starsG);
+
+  return (t: number) => {
+    starsG.rotation.y = t * 0.5;
+    starsG.position.y = starsY + Math.sin(t * 1.3) * 0.25 * scale;
+    puffs.forEach((p, i) => {
+      const k = (t * 0.35 + i / puffs.length) % 1;
+      p.position.set(
+        steamBase.x + Math.sin(t * 0.9 + i * 2.1) * 0.6 * k * scale,
+        steamBase.y + (k * 4.2 - 1.3) * scale,
+        steamBase.z + Math.cos(t * 0.7 + i) * 0.4 * k * scale,
+      );
+      p.scale.setScalar((0.35 + k * 0.9) * scale);
+      p.material.opacity = Math.sin(Math.PI * k) * 0.8;
+    });
+  };
+}
+
+/**
+ * Café from an imported glTF model (e.g. public/models/coffee-shop.glb). The template's geometry and
+ * materials are shared between all cafés; only the steam, stars and coffee surface are per-café.
+ * The model should be in metres, base at y=0, centred on its footprint, shop front facing +Z.
+ */
+export function buildGlbCafe(template: THREE.Object3D, name: string, rating: number, accent: string, targetWidth = 16): CafeModel {
+  const root = new THREE.Group();
+  const disposables: { dispose(): void }[] = [];
+  const track = <T extends { dispose(): void }>(x: T) => (disposables.push(x), x);
+
+  const box = new THREE.Box3().setFromObject(template);
+  const size = box.getSize(new THREE.Vector3());
+  const k = targetWidth / Math.max(size.x, size.z, 1e-6);
+  const model = template.clone(true);
+  model.scale.setScalar(k);
+  root.add(model);
+
+  // Contact shadow under the plot.
+  const shadow = new THREE.Mesh(
+    track(new THREE.PlaneGeometry(targetWidth * 1.5, targetWidth * 1.5)),
+    track(new THREE.MeshBasicMaterial({ map: track(radialTexture('rgba(30,18,10,0.45)', 'rgba(30,18,10,0)')), transparent: true, depthWrite: false })),
+  );
+  shadow.rotation.x = -Math.PI / 2;
+  shadow.position.y = 0.02;
+  root.add(shadow);
+
+  // If the model has a big cup (a mesh named/using a "cup"-like material), fill it with coffee and steam from it.
+  const cup = findCup(template);
+  let steamBase = new THREE.Vector3(0, size.y * k + 1, 0);
+  if (cup) {
+    const c = cup.getCenter(new THREE.Vector3()).multiplyScalar(k);
+    const top = cup.max.y * k;
+    const radius = Math.min(cup.max.x - cup.min.x, cup.max.z - cup.min.z) * k * 0.4;
+    const coffee = new THREE.Mesh(track(new THREE.CircleGeometry(radius, 32)), track(mat('#4a2a17', { roughness: 0.3 })));
+    coffee.rotation.x = -Math.PI / 2;
+    coffee.position.set(c.x, top - radius * 0.28, c.z);
+    root.add(coffee);
+    steamBase = new THREE.Vector3(c.x, top + 1.2, c.z);
+  }
+  // Chalkboard A-frame on the sidewalk with the café's name (the model's own sign is generic).
+  const board = new THREE.Group();
+  const faceM = track(new THREE.MeshStandardMaterial({ map: track(signTexture(name, '#2f3330')), roughness: 0.9 }));
+  const frameM = track(mat(accent, { roughness: 0.6 }));
+  const panelGeo = track(new THREE.BoxGeometry(4.2, 1.1, 0.12));
+  for (const side of [1, -1]) {
+    const panel = new THREE.Mesh(panelGeo, [frameM, frameM, frameM, frameM, side > 0 ? faceM : frameM, side > 0 ? frameM : faceM]);
+    panel.position.set(0, 0.95, side * 0.32);
+    panel.rotation.x = -side * 0.28;
+    board.add(panel);
+  }
+  const legGeo = track(new THREE.BoxGeometry(0.1, 1.9, 0.1));
+  for (const x of [-2, 2]) for (const z of [-0.45, 0.45]) {
+    const leg = new THREE.Mesh(legGeo, frameM);
+    leg.position.set(x, 0.95, z);
+    leg.rotation.x = z > 0 ? -0.28 : 0.28;
+    board.add(leg);
+  }
+  board.scale.setScalar(targetWidth / 16);
+  // Stand it on whatever surface is there (sidewalk, plinth...) near the front-right of the plot.
+  const bx = targetWidth * 0.2, bz = size.z * k * 0.36;
+  model.updateMatrixWorld(true);
+  const hit = new THREE.Raycaster(new THREE.Vector3(bx, size.y * k + 10, bz), new THREE.Vector3(0, -1, 0)).intersectObject(model, true)[0];
+  board.position.set(bx, (hit ? hit.point.y : 0) + 0.02, bz);
+  root.add(board);
+
+  const height = size.y * k;
+  const tick = addTopper(root, rating, track, steamBase, Math.max(height, steamBase.y) + 4.5);
 
   return {
     root,
-    height: H + 10,
-    tick(t: number) {
-      starsG.rotation.y = t * 0.5;
-      starsG.position.y = H + 8.2 + Math.sin(t * 1.3) * 0.25;
-      puffs.forEach((p, i) => {
-        const k = (t * 0.35 + i / puffs.length) % 1;
-        p.position.set(
-          steamBase.x + Math.sin(t * 0.9 + i * 2.1) * 0.6 * k,
-          steamBase.y + k * 4.2 - 1.3,
-          steamBase.z + Math.cos(t * 0.7 + i) * 0.4 * k,
-        );
-        p.scale.setScalar(0.35 + k * 0.9);
-        p.material.opacity = Math.sin(Math.PI * k) * 0.8;
-      });
-    },
+    height: height + 9,
+    tick,
+    // Only dispose per-café resources; the template's geometry and materials are shared.
     dispose() {
       disposables.forEach((d) => d.dispose());
-      root.traverse((o) => (o as THREE.Mesh).geometry?.dispose?.());
     },
   };
+}
+
+/** Bounding box (template space) of the most likely "cup" mesh: material named like cup/xicara/mug. */
+function findCup(template: THREE.Object3D): THREE.Box3 | null {
+  let best: THREE.Box3 | null = null;
+  let bestVol = 0;
+  template.updateMatrixWorld(true);
+  template.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const names = [mesh.name, ...[].concat(mesh.material as never).map((m: THREE.Material) => m.name)].join(' ');
+    if (!/cup|xicara|mug|kos|ספל/i.test(names)) return;
+    const b = new THREE.Box3().setFromObject(mesh);
+    const s = b.getSize(new THREE.Vector3());
+    const vol = s.x * s.y * s.z;
+    if (vol > bestVol) {
+      bestVol = vol;
+      best = b;
+    }
+  });
+  return best;
 }
 
 function halfStarShape(outer: number, inner: number) {

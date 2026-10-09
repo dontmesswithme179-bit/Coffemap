@@ -16,6 +16,21 @@ that spot and a 3D building rises there. Better coffee, taller (and greener) tow
 - **Export / import** your ratings as JSON (⋯ menu). Data is stored in your browser (`localStorage`), so export to back up or move to another device.
 - Works on phones (bottom-sheet layout) and can be added to the home screen.
 
+## Café 3D model
+
+Rated cafés use `public/models/coffee-shop.glb` (glTF binary). The app fills its cup with coffee and adds
+steam, a floating star ring for the rating and a chalkboard sign with the café's name. If the file is missing
+or fails to load, the hand-built café in `src/cafe-model.ts` is used instead.
+
+To swap in another model (metres, base at y=0, shop front facing +Z):
+
+```bash
+npm run model:fbx -- MyShop.fbx /tmp/raw.glb          # FBX → GLB, drops stray/hidden objects, cm → m
+npm run model:optimize -- /tmp/raw.glb public/models/coffee-shop.glb   # simplify + compress
+```
+
+Name the cup mesh `Cup` (or pass `FbxName:Cup` as a third argument to `model:fbx`) so coffee and steam line up.
+
 ## Develop
 
 ```bash
