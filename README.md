@@ -31,6 +31,13 @@ npm run model:optimize -- /tmp/raw.glb public/models/coffee-shop.glb   # simplif
 
 Name the cup mesh `Cup` (or pass `FbxName:Cup` as a third argument to `model:fbx`) so coffee and steam line up.
 
+## Neighbourhood houses
+
+Around every rated café (within the cleared area, 230 m) the map's plain extruded buildings are hidden and each
+building outline gets a random low-poly house from `public/models/houses.glb` (20 types), rotated and sized to
+fit the outline. Houses are drawn with instancing and skipped where the enlarged café model would cover them.
+Convert a new pack with `scripts/houses-fbx-to-glb.mjs` (instructions at the top of the file).
+
 ## Develop
 
 ```bash

@@ -6,6 +6,7 @@ import type { FeatureCollection, Point } from 'geojson';
 import { avgRating, type Place, type Wish } from './store';
 import { Clouds, type Hole } from './clouds';
 import { CafeLayer } from './cafe-layer';
+import { footprintsAround } from './houses';
 
 export const ISRAEL_BOUNDS: [[number, number], [number, number]] = [[34.2, 29.45], [35.95, 33.35]];
 const MAX_BOUNDS: [[number, number], [number, number]] = [[32.6, 28.6], [37.6, 34.2]];
@@ -13,6 +14,8 @@ const STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty';
 /** Free global elevation tiles (AWS Open Data / Mapzen Terrarium) for hillshading. */
 const DEM_TILES = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
 const REVEAL_METERS = 230;
+/** Map buildings within this distance of a rated café are swapped for low-poly houses. */
+const HOUSE_RADIUS = REVEAL_METERS;
 const REVEAL_MIN_PX = 34;
 const GROW_MS = 1400;
 const REVEAL_MS = 1800;
@@ -56,6 +59,8 @@ export class CoffeeMap {
   readonly clouds: Clouds;
   private cafes = new CafeLayer((id) => this.progress(id, GROW_MS));
   private wishMarkers = new Map<string, { marker: Marker; label: HTMLElement }>();
+  /** The style's 3D building layers, with their original filters, so houses can replace them near cafés. */
+  private buildingLayers: { id: string; source: string; sourceLayer: string; filter: unknown }[] = [];
 
   constructor(container: HTMLElement, private events: CoffeeMapEvents) {
     setWorkerUrl(workerUrl);
@@ -130,6 +135,9 @@ export class CoffeeMap {
       if (l.type !== 'fill-extrusion') continue;
       map.setPaintProperty(l.id, 'fill-extrusion-color', ['interpolate', ['linear'], ['zoom'], 14, '#e9dfd2', 17, '#efe6da']);
       map.setPaintProperty(l.id, 'fill-extrusion-opacity', 0.62);
+      if ('source' in l && typeof l.source === 'string') {
+        this.buildingLayers.push({ id: l.id, source: l.source, sourceLayer: l['source-layer'] ?? '', filter: l.filter });
+      }
     }
 
     map.setSky({
@@ -204,6 +212,16 @@ export class CoffeeMap {
 
     this.loaded = true;
     this.syncCafes();
+    // The steam animation keeps the map repainting, so 'idle' rarely fires; react to tiles and moves instead.
+    let pending = 0;
+    const schedule = () => {
+      clearTimeout(pending);
+      pending = window.setTimeout(this.collectHouses, 350);
+    };
+    map.on('moveend', schedule);
+    map.on('sourcedata', (e) => {
+      if (e.isSourceLoaded && this.buildingLayers.some((l) => l.source === e.sourceId)) schedule();
+    });
     this.render();
   }
 
@@ -234,7 +252,53 @@ export class CoffeeMap {
       const rating = avgRating(p);
       return { id: p.id, name: p.name, rating, accent: ratingColor(rating), lng: p.lng, lat: p.lat };
     }));
+    this.hideBuildingsNearCafes();
+    this.collectHouses();
   }
+
+  /** Drop the plain extruded buildings around cafés; houses are drawn there instead. */
+  private hideBuildingsNearCafes() {
+    const pts = this.places.map((p) => [p.lng, p.lat]);
+    for (const l of this.buildingLayers) {
+      const near = ['>', ['distance', { type: 'MultiPoint', coordinates: pts }], HOUSE_RADIUS];
+      const filter = pts.length ? (l.filter ? ['all', l.filter, near] : near) : l.filter;
+      try {
+        this.map.setFilter(l.id, (filter ?? null) as never);
+      } catch (err) {
+        console.warn('Could not hide buildings near cafés', err);
+      }
+    }
+  }
+
+  /**
+   * Read building outlines from the loaded map tiles and hand them to the café layer.
+   * Tiles only hold buildings from zoom 14, and only for the area on screen, so this re-runs as
+   * tiles load and keeps whichever result found more buildings.
+   */
+  private collectHouses = () => {
+    const l = this.buildingLayers[0];
+    if (!l || this.map.getZoom() < 14 || !this.places.length) return;
+    const bounds = this.map.getBounds();
+    const pad = 0.004; // ~400 m, so cafés just off-screen still get their neighbourhood
+    const nearby = this.places.filter((p) =>
+      p.lng > bounds.getWest() - pad && p.lng < bounds.getEast() + pad &&
+      p.lat > bounds.getSouth() - pad && p.lat < bounds.getNorth() + pad);
+    if (!nearby.length) return;
+    let polygons: GeoJSON.Position[][][];
+    try {
+      polygons = this.map
+        .querySourceFeatures(l.source, { sourceLayer: l.sourceLayer || undefined })
+        .flatMap((f) =>
+          f.geometry.type === 'Polygon' ? [f.geometry.coordinates] :
+          f.geometry.type === 'MultiPolygon' ? f.geometry.coordinates : []);
+    } catch {
+      return;
+    }
+    for (const p of nearby) {
+      const list = footprintsAround(p.lng, p.lat, HOUSE_RADIUS, polygons);
+      if (list.length > this.cafes.footprintCount(p.id)) this.cafes.setFootprints(p.id, list);
+    }
+  };
 
   /**
    * Wish-list pins are DOM markers, so they sit above the clouds and stay visible at every zoom.

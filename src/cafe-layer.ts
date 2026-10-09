@@ -2,6 +2,10 @@ import * as THREE from 'three';
 import type { CustomLayerInterface, CustomRenderMethodInput, Map as MLMap } from 'maplibre-gl';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { buildCafe, buildGlbCafe, type CafeModel } from './cafe-model';
+import { loadHouseKit, Neighbourhood, type Footprint } from './houses';
+
+/** Houses are true-scale, so below this zoom they're specks; skip drawing them. */
+const HOUSE_MIN_ZOOM = 14.5;
 
 /** Imported café model; the hand-built café is used until it loads, or if it fails to. */
 const CAFE_MODEL_URL = `${import.meta.env.BASE_URL}models/coffee-shop.glb`;
@@ -60,6 +64,11 @@ export class CafeLayer implements CustomLayerInterface {
   private lastMatrix = new THREE.Matrix4();
   private start = performance.now();
   private template: THREE.Object3D | null = null;
+  /** Separate scene (with its own lights) for the true-scale houses around each café. */
+  private houseScene = new THREE.Scene();
+  private kit: Awaited<ReturnType<typeof loadHouseKit>> | null = null;
+  private footprints = new Map<string, Footprint[]>();
+  private hoods = new Map<string, Neighbourhood>();
 
   constructor(private getGrow: (id: string) => number) {
     this.scene.add(new THREE.HemisphereLight(0xfff3df, 0x7d6a58, 2.1));
@@ -69,6 +78,36 @@ export class CafeLayer implements CustomLayerInterface {
     const rim = new THREE.DirectionalLight(0xc9dcff, 0.8);
     rim.position.set(0.8, 0.6, -1);
     this.scene.add(rim);
+    this.houseScene.add(new THREE.HemisphereLight(0xfff3df, 0x7d6a58, 2.0));
+    const hSun = new THREE.DirectionalLight(0xfff0d6, 2.4);
+    hSun.position.set(-0.6, 1, 0.9);
+    this.houseScene.add(hSun);
+  }
+
+  /** Building outlines around a café; they get replaced with low-poly houses. */
+  setFootprints(id: string, list: Footprint[]) {
+    this.footprints.set(id, list);
+    this.rebuildHood(id);
+    this.map?.triggerRepaint();
+  }
+
+  footprintCount(id: string) {
+    return this.footprints.get(id)?.length ?? 0;
+  }
+
+  private rebuildHood(id: string) {
+    const old = this.hoods.get(id);
+    if (old) {
+      this.houseScene.remove(old.group);
+      old.dispose();
+      this.hoods.delete(id);
+    }
+    const list = this.footprints.get(id);
+    if (!this.kit || !list?.length || !this.entries.has(id)) return;
+    const hood = new Neighbourhood(this.kit, list);
+    hood.group.visible = false;
+    this.houseScene.add(hood.group);
+    this.hoods.set(id, hood);
   }
 
   onAdd(map: MLMap, gl: WebGL2RenderingContext) {
@@ -88,11 +127,20 @@ export class CafeLayer implements CustomLayerInterface {
       undefined,
       (err) => console.warn('Café model failed to load, using the built-in one', err),
     );
+    loadHouseKit()
+      .then((kit) => {
+        this.kit = kit;
+        this.footprints.forEach((_, id) => this.rebuildHood(id));
+        this.map.triggerRepaint();
+      })
+      .catch((err) => console.warn('Houses failed to load; keeping the map buildings', err));
   }
 
   onRemove() {
     this.entries.forEach((e) => e.model.dispose());
     this.entries.clear();
+    this.hoods.forEach((h) => h.dispose());
+    this.hoods.clear();
   }
 
   setCafes(cafes: CafeSpec[]) {
@@ -123,7 +171,11 @@ export class CafeLayer implements CustomLayerInterface {
       this.scene.remove(e.model.root);
       e.model.dispose();
       this.entries.delete(id);
+      this.footprints.delete(id);
+      this.rebuildHood(id);
     }
+    // Footprints may have arrived before the café entry existed.
+    for (const id of this.footprints.keys()) if (!this.hoods.has(id)) this.rebuildHood(id);
     this.map?.triggerRepaint();
   }
 
@@ -134,6 +186,30 @@ export class CafeLayer implements CustomLayerInterface {
       .makeTranslation(e.mx, e.my, 0)
       .scale(new THREE.Vector3(s, -s, s))
       .multiply(new THREE.Matrix4().makeRotationX(Math.PI / 2));
+  }
+
+  /** True-scale local frame (metres, x east, y up, z south); houses rise as the clouds part. */
+  private houseMatrix(e: Entry) {
+    const g = Math.max(1e-3, 1 - Math.pow(1 - Math.min(1, Math.max(0, this.getGrow(e.spec.id))), 3));
+    const m = e.mPerMerc;
+    return new THREE.Matrix4()
+      .makeTranslation(e.mx, e.my, 0)
+      .scale(new THREE.Vector3(m, -m, m))
+      .multiply(new THREE.Matrix4().makeRotationX(Math.PI / 2))
+      .multiply(new THREE.Matrix4().makeScale(1, g, 1));
+  }
+
+  private renderHouses(e: Entry, vp: THREE.Matrix4, zoom: number) {
+    const hood = this.hoods.get(e.spec.id);
+    if (!hood || zoom < HOUSE_MIN_ZOOM) return;
+    // Don't draw houses that the enlarged café model would swallow at this zoom.
+    hood.setHiddenRadius(11 * cafeExaggeration(zoom));
+    hood.group.visible = true;
+    this.camera.projectionMatrix = vp.clone().multiply(this.houseMatrix(e));
+    this.camera.projectionMatrixInverse.copy(this.camera.projectionMatrix).invert();
+    this.renderer.resetState();
+    this.renderer.render(this.houseScene, this.camera);
+    hood.group.visible = false;
   }
 
   render(_gl: WebGL2RenderingContext, args: CustomRenderMethodInput) {
@@ -151,6 +227,7 @@ export class CafeLayer implements CustomLayerInterface {
         continue;
       }
       if (this.getGrow(e.spec.id) < 1) animating = true;
+      this.renderHouses(e, vp, zoom);
       e.model.root.visible = true;
       e.model.tick(t + e.mx * 1e5);
       this.camera.projectionMatrix = vp.clone().multiply(this.modelMatrix(e, zoom));
