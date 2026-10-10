@@ -7,6 +7,7 @@ import { avgRating, type Place, type Wish } from './store';
 import { Clouds, type Hole } from './clouds';
 import { CafeLayer } from './cafe-layer';
 import { footprintsAround } from './houses';
+import { cafesGeoJSON } from './cafe-directory';
 
 export const ISRAEL_BOUNDS: [[number, number], [number, number]] = [[34.2, 29.45], [35.95, 33.35]];
 const MAX_BOUNDS: [[number, number], [number, number]] = [[32.6, 28.6], [37.6, 34.2]];
@@ -74,7 +75,10 @@ export class CoffeeMap {
       fitBoundsOptions: { padding: 40 },
       maxBounds: MAX_BOUNDS,
       maxPitch: 75,
-      attributionControl: { compact: true },
+      attributionControl: {
+        compact: true,
+        customAttribution: 'Cafés: <a href="https://overturemaps.org" target="_blank" rel="noopener">Overture Maps</a>',
+      },
     });
     this.map.addControl(new NavigationControl({ visualizePitch: true }), 'bottom-right');
 
@@ -208,6 +212,38 @@ export class CoffeeMap {
         'text-opacity': ['interpolate', ['linear'], ['zoom'], 15.5, ['get', 'grow'], 16.5, 0],
       },
     });
+    // Every known café (Overture Maps), shown while choosing where you drank so you can just tap it.
+    map.addSource('known-cafes', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    map.addLayer({
+      id: 'known-cafe-dot',
+      type: 'circle',
+      source: 'known-cafes',
+      minzoom: 12,
+      layout: { visibility: 'none' },
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 3, 16, 7],
+        'circle-color': '#6b3f26',
+        'circle-stroke-color': '#fffaf2',
+        'circle-stroke-width': 2,
+      },
+    });
+    map.addLayer({
+      id: 'known-cafe-label',
+      type: 'symbol',
+      source: 'known-cafes',
+      minzoom: 15,
+      layout: {
+        visibility: 'none',
+        'text-field': ['get', 'name'],
+        'text-font': ['Noto Sans Regular'],
+        'text-size': 12,
+        'text-anchor': 'top',
+        'text-offset': [0, 0.8],
+        'text-max-width': 9,
+      },
+      paint: { 'text-color': '#3b2418', 'text-halo-color': '#fffaf2', 'text-halo-width': 1.5 },
+    });
+    cafesGeoJSON().then((data) => (map.getSource('known-cafes') as GeoJSONSource | undefined)?.setData(data));
     map.addLayer(this.cafes);
 
     this.loaded = true;
@@ -339,6 +375,17 @@ export class CoffeeMap {
       m.marker.remove();
       this.wishMarkers.delete(id);
     }
+  }
+
+  /** Show or hide the directory of known cafés (while choosing a spot). */
+  setKnownCafesVisible(on: boolean) {
+    if (!this.loaded) return;
+    for (const id of ['known-cafe-dot', 'known-cafe-label']) this.map.setLayoutProperty(id, 'visibility', on ? 'visible' : 'none');
+  }
+
+  /** Map metres covered by `px` screen pixels at a latitude (for tap tolerances). */
+  pxToMetres(px: number, lat: number) {
+    return (px * 78_271.517 * Math.cos((lat * Math.PI) / 180)) / Math.pow(2, this.map.getZoom());
   }
 
   /** Restart the grow animation for one place (e.g. after rating it again). */

@@ -3,6 +3,7 @@ import './style.css';
 import { avgRating, lastVisit, store, type Place, type Wish } from './store';
 import { CoffeeMap, ratingColor } from './map';
 import { searchPlaces, type SearchResult } from './search';
+import { loadCafes, nearestCafe, searchCafes, type KnownCafe } from './cafe-directory';
 
 /** Rating a coffee you drank, or saving a place to try later. */
 type Mode = 'rate' | 'wish';
@@ -99,7 +100,7 @@ function updateStats() {
 function startPicking(mode: Mode = 'rate') {
   picking = true;
   pickMode = mode;
-  $('#pick-text').textContent = mode === 'wish' ? 'Tap the place you want to try' : 'Tap the map where you had your coffee';
+  $('#pick-text').textContent = mode === 'wish' ? 'Tap the café you want to try' : 'Tap the café (or the spot) where you had your coffee';
   document.body.classList.add('is-picking');
   $('#pick-banner').hidden = false;
   cmap.clouds.setOpacity(0.25);
@@ -119,8 +120,21 @@ function clearPickMarker() {
   cmap.setPickPoint(null);
 }
 
-function choosePoint(lng: number, lat: number, name: string) {
+/**
+ * `snapMetres`: how far a known café may be from the point to count as "this café" (default: about
+ * a fingertip on screen). Pass 0 when the location is already exact, e.g. a search result.
+ */
+function choosePoint(lng: number, lat: number, name: string, snapMetres = Math.max(12, cmap.pxToMetres(28, lat))) {
   const mode: Mode = view.kind === 'form' ? view.mode : pickMode;
+  // Snap to a known café near the point, so the name and the spot are the café's real ones.
+  if (snapMetres > 0) {
+    const known = nearestCafe(lng, lat, snapMetres);
+    if (known) {
+      lng = known.lng;
+      lat = known.lat;
+      name = known.name;
+    }
+  }
   // When rating, a tap close to an existing place means "another cup here".
   const near = mode === 'wish' ? undefined : store.all().find((p) => {
     const a = cmap.map.project([p.lng, p.lat]);
@@ -153,9 +167,10 @@ function locateMe() {
   toast('Finding you…');
   navigator.geolocation.getCurrentPosition(
     (pos) => {
-      const { longitude: lng, latitude: lat } = pos.coords;
+      const { longitude: lng, latitude: lat, accuracy } = pos.coords;
       cmap.flyTo([lng, lat], 17);
-      choosePoint(lng, lat, '');
+      // GPS is off by tens of metres indoors; look for the café you're probably sitting in.
+      choosePoint(lng, lat, '', Math.min(80, Math.max(30, accuracy || 0)));
     },
     () => toast("Couldn't get your location"),
     { enableHighAccuracy: true, timeout: 10_000 },
@@ -169,6 +184,7 @@ function render() {
   panel.replaceChildren();
   panel.dataset.view = view.kind;
   $('#fabs').hidden = view.kind === 'form';
+  cmap.setKnownCafesVisible(picking || (view.kind === 'form' && !view.placeId && !view.wishId));
   if (view.kind !== 'form') {
     clearPickMarker();
     if (!picking) cmap.clouds.setOpacity(1);
@@ -536,36 +552,57 @@ const searchInput = $<HTMLInputElement>('#search-input');
 const resultsEl = $('#search-results');
 let lastResults: SearchResult[] = [];
 
+/** "350 m" / "12 km" from the middle of the map, to tell branches with the same name apart. */
+function distanceLabel(lng: number, lat: number) {
+  const c = cmap.map.getCenter();
+  const m = Math.hypot((lng - c.lng) * 111_320 * Math.cos((lat * Math.PI) / 180), (lat - c.lat) * 110_540);
+  return m < 1000 ? `${Math.round(m / 10) * 10} m` : `${m < 10_000 ? (m / 1000).toFixed(1) : Math.round(m / 1000)} km`;
+}
+
 $('#search').addEventListener('submit', async (e) => {
   e.preventDefault();
   const q = searchInput.value.trim();
   if (q.length < 2) return;
   resultsEl.hidden = false;
   resultsEl.replaceChildren(h('li', { class: 'muted' }, 'Searching…'));
-  try {
-    lastResults = await searchPlaces(q);
-  } catch {
-    resultsEl.replaceChildren(h('li', { class: 'muted' }, 'Search failed — check your connection'));
-    return;
+  // Cafés from the bundled directory (exact names and spots) first, then streets/addresses.
+  const [cafes, places] = await Promise.all([
+    searchCafes(q, cmap.map.getCenter()),
+    searchPlaces(q).catch(() => null),
+  ]);
+  lastResults = places ?? [];
+  const pick = (lng: number, lat: number, name: string) => {
+    resultsEl.hidden = true;
+    searchInput.value = name;
+    cmap.flyTo([lng, lat], 17.5);
+    choosePoint(lng, lat, name, 0);
+  };
+  const items: HTMLElement[] = [
+    ...cafes.map((c: KnownCafe) =>
+      h('li', {},
+        h('button', { type: 'button', onclick: () => pick(c.lng, c.lat, c.name) },
+          h('strong', {}, `☕ ${c.name}`), h('small', {}, [c.address || 'Café', distanceLabel(c.lng, c.lat)].join(' · '))),
+      ),
+    ),
+    ...lastResults
+      // Skip address hits that are just the same café again.
+      .filter((r) => !cafes.some((c) => Math.abs(c.lat - r.lat) < 0.0003 && Math.abs(c.lng - r.lng) < 0.0003))
+      .map((r) =>
+        h('li', {},
+          h('button', { type: 'button', onclick: () => pick(r.lng, r.lat, r.name) },
+            h('strong', {}, r.name), h('small', {}, r.detail)),
+        ),
+      ),
+  ];
+  if (!items.length) {
+    items.push(h('li', { class: 'muted' }, places === null ? 'Search failed — check your connection' : 'Nothing found in Israel'));
+  } else if (places === null) {
+    items.push(h('li', { class: 'muted' }, 'Street search is offline; showing known cafés only'));
   }
-  resultsEl.replaceChildren(
-    ...(lastResults.length
-      ? lastResults.map((r) =>
-          h('li', {},
-            h('button', {
-              type: 'button',
-              onclick: () => {
-                resultsEl.hidden = true;
-                searchInput.value = r.name;
-                cmap.flyTo([r.lng, r.lat], 17);
-                choosePoint(r.lng, r.lat, r.name);
-              },
-            }, h('strong', {}, r.name), h('small', {}, r.detail)),
-          ),
-        )
-      : [h('li', { class: 'muted' }, 'Nothing found in Israel')]),
-  );
+  resultsEl.replaceChildren(...items);
 });
+// Warm the café directory so the first tap/search is instant.
+loadCafes();
 document.addEventListener('click', (e) => {
   if (!(e.target as HTMLElement).closest('#search')) resultsEl.hidden = true;
   if (!(e.target as HTMLElement).closest('.menu')) $('#menu').hidden = true;
