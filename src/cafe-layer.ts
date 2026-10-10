@@ -4,8 +4,13 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { buildCafe, buildGlbCafe, type CafeModel } from './cafe-model';
 import { loadHouseKit, Neighbourhood, type Footprint } from './houses';
 
-/** Houses are true-scale, so below this zoom they're specks; skip drawing them. */
-const HOUSE_MIN_ZOOM = 14.5;
+/**
+ * The 3D café and its houses stay folded away until street level, then rise as you zoom past this
+ * (like a pop-up book); below it the map shows the flat coffee-stain marker instead.
+ */
+export const POPUP_ZOOM = 16.3;
+const POPUP_RANGE = 0.7;
+const HOUSE_MIN_ZOOM = POPUP_ZOOM;
 
 /** Imported café model; the hand-built café is used until it loads, or if it fails to. */
 const CAFE_MODEL_URL = `${import.meta.env.BASE_URL}models/coffee-shop.glb`;
@@ -29,7 +34,7 @@ interface Entry {
 }
 
 const EARTH_CIRCUMFERENCE = 40_075_016.686;
-const MIN_ZOOM = 12.8;
+const MIN_ZOOM = POPUP_ZOOM;
 
 function toMercator(lng: number, lat: number) {
   const x = (lng + 180) / 360;
@@ -179,8 +184,13 @@ export class CafeLayer implements CustomLayerInterface {
     this.map?.triggerRepaint();
   }
 
+  /** 0 → 1 as you zoom in past POPUP_ZOOM. */
+  private popup(zoom: number) {
+    return Math.max(0, easeOutBack(Math.min(1, (zoom - POPUP_ZOOM) / POPUP_RANGE)));
+  }
+
   private modelMatrix(e: Entry, zoom: number) {
-    const grow = Math.max(0, easeOutBack(Math.min(1, this.getGrow(e.spec.id))));
+    const grow = Math.max(0, easeOutBack(Math.min(1, this.getGrow(e.spec.id)))) * this.popup(zoom);
     const s = e.mPerMerc * cafeExaggeration(zoom) * Math.max(grow, 1e-4);
     return new THREE.Matrix4()
       .makeTranslation(e.mx, e.my, 0)
@@ -189,8 +199,8 @@ export class CafeLayer implements CustomLayerInterface {
   }
 
   /** True-scale local frame (metres, x east, y up, z south); houses rise as the clouds part. */
-  private houseMatrix(e: Entry) {
-    const g = Math.max(1e-3, 1 - Math.pow(1 - Math.min(1, Math.max(0, this.getGrow(e.spec.id))), 3));
+  private houseMatrix(e: Entry, zoom: number) {
+    const g = Math.max(1e-3, (1 - Math.pow(1 - Math.min(1, Math.max(0, this.getGrow(e.spec.id))), 3)) * this.popup(zoom));
     const m = e.mPerMerc;
     return new THREE.Matrix4()
       .makeTranslation(e.mx, e.my, 0)
@@ -205,7 +215,7 @@ export class CafeLayer implements CustomLayerInterface {
     // Don't draw houses that the enlarged café model would swallow at this zoom.
     hood.setHiddenRadius(11 * cafeExaggeration(zoom));
     hood.group.visible = true;
-    this.camera.projectionMatrix = vp.clone().multiply(this.houseMatrix(e));
+    this.camera.projectionMatrix = vp.clone().multiply(this.houseMatrix(e, zoom));
     this.camera.projectionMatrixInverse.copy(this.camera.projectionMatrix).invert();
     this.renderer.resetState();
     this.renderer.render(this.houseScene, this.camera);

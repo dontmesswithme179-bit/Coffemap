@@ -1,9 +1,9 @@
 import { Marker } from 'maplibre-gl';
 import './style.css';
 import { avgRating, lastVisit, store, type Place, type Wish } from './store';
-import { CoffeeMap, ratingColor } from './map';
+import { CLIP_COLORS, CoffeeMap, KIND_ICONS, STAR_SVG, ratingColor } from './map';
 import { searchPlaces, type SearchResult } from './search';
-import { KIND_INFO, loadPlaces, nearestPlace, searchKnownPlaces, type KnownPlace } from './place-directory';
+import { KIND_INFO, loadPlaces, nearestPlace, searchKnownPlaces, type KnownPlace, type PlaceKind } from './place-directory';
 
 /** Rating a coffee you drank, or saving a place to try later. */
 type Mode = 'rate' | 'wish';
@@ -12,7 +12,20 @@ type View =
   | { kind: 'list' }
   | { kind: 'place'; id: string }
   | { kind: 'wish'; id: string }
-  | { kind: 'form'; mode: Mode; placeId?: string; wishId?: string; lng: number; lat: number; name: string; note?: string };
+  | { kind: 'form'; mode: Mode; placeId?: string; wishId?: string; lng: number; lat: number; name: string; note?: string; placeKind?: PlaceKind };
+
+/** Where a wish-list place was spotted. */
+const SOURCES = ['Instagram', 'Ad / poster', 'A friend', 'TikTok', 'An article', 'Walked past'];
+
+/** Static icon markup (never user text) for buttons and badges. */
+function svgIcon(markup: string, cls = '') {
+  const span = document.createElement('span');
+  span.className = cls;
+  span.setAttribute('aria-hidden', 'true');
+  span.innerHTML = markup;
+  return span;
+}
+const PIN_SVG = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4h6l-1 6 3 3H7l3-3z"/><path d="M12 13v7"/></svg>';
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string) => document.querySelector(sel) as T;
 
@@ -62,7 +75,7 @@ const panel = $('#panel');
 let view: View = { kind: 'list' };
 let picking = false;
 let pickMode: Mode = 'rate';
-let listTab: 'rated' | 'wishes' = 'rated';
+let listTab: 'rated' | 'wishes' = 'wishes';
 let pickMarker: Marker | null = null;
 
 const cmap = new CoffeeMap($('#map'), {
@@ -90,9 +103,12 @@ function updateStats() {
   const cups = places.reduce((s, p) => s + p.visits.length, 0);
   const avg = cups ? places.reduce((s, p) => s + p.visits.reduce((a, v) => a + v.rating, 0), 0) / cups : 0;
   const wishes = store.wishList().length;
-  $('#stats').textContent = (cups
-    ? `${places.length} ${places.length === 1 ? 'place' : 'places'} · ${cups} ${cups === 1 ? 'cup' : 'cups'} · avg ★ ${avg.toFixed(1)}`
-    : 'No cups rated yet') + (wishes ? ` · ♥ ${wishes}` : '');
+  const parts = [
+    places.length ? `${places.length} visited` : '',
+    wishes ? `${wishes} pinned` : '',
+    cups ? `avg ★ ${avg.toFixed(1)}` : '',
+  ].filter(Boolean);
+  $('#stats').textContent = parts.length ? parts.join(' · ') : 'Nothing pinned yet';
 }
 
 // --- Picking a location ------------------------------------------------------
@@ -124,7 +140,7 @@ function clearPickMarker() {
  * `snapMetres`: how far a known café may be from the point to count as "this café" (default: about
  * a fingertip on screen). Pass 0 when the location is already exact, e.g. a search result.
  */
-function choosePoint(lng: number, lat: number, name: string, snapMetres = Math.max(12, cmap.pxToMetres(28, lat))) {
+function choosePoint(lng: number, lat: number, name: string, snapMetres = Math.max(12, cmap.pxToMetres(28, lat)), placeKind?: PlaceKind) {
   const mode: Mode = view.kind === 'form' ? view.mode : pickMode;
   // Snap to a known café or eating place near the point, so the name and the spot are its real ones.
   if (snapMetres > 0) {
@@ -133,6 +149,7 @@ function choosePoint(lng: number, lat: number, name: string, snapMetres = Math.m
       lng = known.lng;
       lat = known.lat;
       name = known.name;
+      placeKind = known.kind;
     }
   }
   // When rating, a tap close to an existing place means "another cup here".
@@ -147,7 +164,7 @@ function choosePoint(lng: number, lat: number, name: string, snapMetres = Math.m
     return setView({ kind: 'form', mode: 'rate', placeId: near.id, lng: near.lng, lat: near.lat, name: near.name });
   }
   if (!pickMarker) {
-    pickMarker = new Marker({ color: '#3b2418', draggable: true }).setLngLat([lng, lat]).addTo(cmap.map);
+    pickMarker = new Marker({ color: '#b8323f', draggable: true }).setLngLat([lng, lat]).addTo(cmap.map);
     pickMarker.on('drag', () => {
       const p = pickMarker!.getLngLat();
       cmap.setPickPoint({ lng: p.lng, lat: p.lat });
@@ -159,7 +176,7 @@ function choosePoint(lng: number, lat: number, name: string, snapMetres = Math.m
   cmap.setPickPoint({ lng, lat });
   cmap.clouds.setOpacity(0.55);
   const prevName = view.kind === 'form' && !view.placeId ? (panel.querySelector('#f-name') as HTMLInputElement)?.value : '';
-  setView({ kind: 'form', mode, lng, lat, name: name || prevName || '' });
+  setView({ kind: 'form', mode, lng, lat, name: name || prevName || '', placeKind });
 }
 
 function locateMe() {
@@ -202,8 +219,8 @@ function renderTabs() {
       onclick: () => { listTab = id; render(); },
     }, label);
   return h('div', { class: 'tabs', role: 'tablist' },
-    tab('rated', `☕ Rated (${store.all().length})`),
-    tab('wishes', `♥ Wish list (${store.wishList().length})`),
+    tab('wishes', `Pinned (${store.wishList().length})`),
+    tab('rated', `Been there (${store.all().length})`),
   );
 }
 
@@ -214,10 +231,10 @@ function renderList() {
   if (!places.length) {
     panel.append(
       h('div', { class: 'empty' },
-        h('div', { class: 'empty__art', 'aria-hidden': 'true' }, '☁️☕☁️'),
-        h('h2', {}, 'Israel is still under the clouds'),
-        h('p', {}, 'Every coffee you rate parts the clouds and raises a building where you drank it. Better coffee, taller tower.'),
-        h('button', { class: 'btn btn--primary', onclick: () => startPicking('rate') }, 'Rate your first coffee'),
+        h('div', { class: 'empty__art' }, svgIcon(STAR_SVG)),
+        h('h2', {}, 'No stains yet'),
+        h('p', {}, 'When you finally visit a pinned place, rate it: the tracing paper tears away there and the place gets a coffee stain and a star.'),
+        h('button', { class: 'btn btn--primary', onclick: () => startPicking('rate') }, 'Rate a place I went to'),
       ),
     );
     return;
@@ -235,10 +252,10 @@ function renderList() {
             cmap.flyTo([p.lng, p.lat]);
           },
         },
-          h('span', { class: 'place-item__badge', style: `--c:${ratingColor(r)}` }, r.toFixed(1)),
+          h('span', { class: 'place-item__badge' }, r.toFixed(1)),
           h('span', { class: 'place-item__body' },
             h('strong', {}, p.name),
-            h('small', {}, `${p.visits.length} ${p.visits.length === 1 ? 'cup' : 'cups'}${lv ? ` · last ${fmtDate(lv.date)}` : ''}`),
+            h('small', {}, `${p.visits.length} ${p.visits.length === 1 ? 'visit' : 'visits'}${lv ? ` · last ${fmtDate(lv.date)}` : ''}`),
           ),
         ),
       ),
@@ -246,7 +263,7 @@ function renderList() {
   }
   panel.append(
     h('div', { class: 'panel__head' },
-      h('h2', { class: 'grow' }, 'My coffee map'),
+      h('h2', { class: 'grow' }, "Places I've been"),
       h('button', { class: 'btn btn--ghost btn--sm', onclick: () => cmap.showAll() }, 'Show all'),
     ),
     list,
@@ -258,10 +275,10 @@ function renderWishList() {
   if (!wishes.length) {
     panel.append(
       h('div', { class: 'empty' },
-        h('div', { class: 'empty__art', 'aria-hidden': 'true' }, '♥'),
-        h('h2', {}, 'Places you want to try'),
-        h('p', {}, 'Heard about a great café? Pin it to your wish list. It stays on the map above the clouds until you go and rate it.'),
-        h('button', { class: 'btn btn--wish', onclick: () => startPicking('wish') }, 'Add a place'),
+        h('div', { class: 'empty__art', style: 'color: var(--red)' }, svgIcon(PIN_SVG)),
+        h('h2', {}, 'Saw an ad? Pin it.'),
+        h('p', {}, "Spotted a café or restaurant on Instagram, a poster or in a friend's story? Pin it here instead of in your notes. It stays taped to the map until you go."),
+        h('button', { class: 'btn btn--wish', onclick: () => startPicking('wish') }, 'Pin my first place'),
       ),
     );
     return;
@@ -277,10 +294,14 @@ function renderWishList() {
               cmap.flyTo([w.lng, w.lat]);
             },
           },
-            h('span', { class: 'place-item__badge place-item__badge--wish', 'aria-hidden': 'true' }, '♥'),
+            (() => {
+              const badge = svgIcon(KIND_ICONS[w.kind ?? 'c'], 'place-item__badge place-item__badge--wish');
+              badge.style.setProperty('--photo', CLIP_COLORS[w.kind ?? 'c']);
+              return badge;
+            })(),
             h('span', { class: 'place-item__body' },
               h('strong', {}, w.name),
-              h('small', {}, w.note ? w.note.slice(0, 60) : `Added ${fmtDate(w.addedAt)}`),
+              h('small', {}, [w.source, w.note ? w.note.slice(0, 50) : `pinned ${fmtDate(w.addedAt)}`].filter(Boolean).join(' · ')),
             ),
           ),
         ),
@@ -307,25 +328,26 @@ function renderWish(id: string) {
       }, '✎'),
     ),
     h('div', { class: 'wish-card' },
-      h('small', {}, `♥ On your wish list since ${fmtDate(w.addedAt)}`),
+      h('p', { class: 'kicker' }, w.source ? `Pinned from ${w.source.toLowerCase()}` : 'Pinned to try'),
+      h('small', {}, `Since ${fmtDate(w.addedAt)}`),
       w.note ? h('p', {}, w.note) : null,
     ),
     h('div', { class: 'row' },
       h('button', {
         class: 'btn btn--primary grow',
         onclick: () => setView({ kind: 'form', mode: 'rate', wishId: w.id, lng: w.lng, lat: w.lat, name: w.name }),
-      }, '☕ Drank here — rate it'),
+      }, 'I went · rate it'),
       h('button', { class: 'btn btn--ghost', onclick: () => cmap.flyTo([w.lng, w.lat]) }, 'Fly there'),
     ),
     h('button', {
       class: 'btn btn--danger btn--sm',
       onclick: () => {
-        if (!confirm(`Remove “${w.name}” from your wish list?`)) return;
+        if (!confirm(`Unpin “${w.name}”?`)) return;
         store.deleteWish(w.id);
         listTab = 'wishes';
         setView({ kind: 'list' });
       },
-    }, 'Remove from wish list'),
+    }, 'Unpin'),
   );
 }
 
@@ -350,10 +372,10 @@ function renderPlace(id: string) {
     h('div', { class: 'score', style: `--c:${ratingColor(r)}` },
       h('span', { class: 'score__num' }, r.toFixed(1)),
       starsEl(r, 'score__stars'),
-      h('span', { class: 'score__meta' }, `${p.visits.length} ${p.visits.length === 1 ? 'cup' : 'cups'} here`),
+      h('span', { class: 'score__meta' }, `${p.visits.length} ${p.visits.length === 1 ? 'visit' : 'visits'}`),
     ),
     h('div', { class: 'row' },
-      h('button', { class: 'btn btn--primary', onclick: () => setView({ kind: 'form', mode: 'rate', placeId: p.id, lng: p.lng, lat: p.lat, name: p.name }) }, '＋ Another cup'),
+      h('button', { class: 'btn btn--primary', onclick: () => setView({ kind: 'form', mode: 'rate', placeId: p.id, lng: p.lng, lat: p.lat, name: p.name }) }, 'I went again'),
       h('button', { class: 'btn btn--ghost', onclick: () => cmap.flyTo([p.lng, p.lat]) }, 'Fly there'),
     ),
     h('ul', { class: 'visits' },
@@ -462,22 +484,22 @@ function renderForm(v: Extract<View, { kind: 'form' }>) {
       setView({ kind: 'place', id });
       const p = store.get(id)!;
       cmap.flyTo([p.lng, p.lat]);
-      toast(existing ? 'Cup logged ☕' : 'The clouds part… ☀️');
+      toast(existing ? 'Visit logged!' : fromWish ? 'Unpinned & stained!' : 'Torn away — stain added!');
     },
   },
     h('div', { class: 'panel__head' },
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Cancel', onclick: cancel }, '✕'),
-      h('h2', { class: 'grow' }, existing ? `Another cup at ${existing.name}` : 'Rate this coffee'),
+      h('h2', { class: 'grow' }, existing ? `Again at ${existing.name}` : fromWish ? `How was ${fromWish.name}?` : 'How was it?'),
     ),
     isNew ? modeTabs(v) : null,
     existing ? null : h('label', { for: 'f-name' }, 'Place', name),
     isNew ? h('p', { class: 'hint' }, 'Drag the pin or tap the map to adjust the spot.') : null,
-    h('label', {}, 'How tasty was it?', starInput(0, (r) => { rating = r; error.hidden = true; })),
+    h('label', {}, 'Your rating', starInput(0, (r) => { rating = r; error.hidden = true; })),
     h('label', { for: 'f-comment' }, 'Notes', comment),
     h('label', { for: 'f-date' }, 'Date', date),
     error,
     h('div', { class: 'row' },
-      h('button', { type: 'submit', class: 'btn btn--primary grow' }, existing ? 'Log cup' : 'Save & reveal'),
+      h('button', { type: 'submit', class: 'btn btn--primary grow' }, existing ? 'Log visit' : 'Add my stain'),
       h('button', { type: 'button', class: 'btn btn--ghost', onclick: cancel }, 'Cancel'),
     ),
   );
@@ -501,7 +523,7 @@ function modeTabs(v: Extract<View, { kind: 'form' }>) {
         setView({ ...cur, mode, name: nm });
       },
     }, label);
-  return h('div', { class: 'tabs', role: 'tablist' }, sw('rate', '☕ I drank here'), sw('wish', '♥ Want to try'));
+  return h('div', { class: 'tabs', role: 'tablist' }, sw('wish', 'Pin to try'), sw('rate', 'I went here'));
 }
 
 function renderWishForm(v: Extract<View, { kind: 'form' }>) {
@@ -510,6 +532,17 @@ function renderWishForm(v: Extract<View, { kind: 'form' }>) {
   note.value = v.note ?? '';
   const error = h('p', { class: 'form__error', hidden: true });
   const cancel = () => { clearPickMarker(); setView({ kind: 'list' }); };
+  // Where did you see it? One tap; tap again to clear.
+  let source = '';
+  const chips: HTMLButtonElement[] = SOURCES.map((s) =>
+    h('button', {
+      type: 'button', class: 'chip', 'aria-pressed': 'false',
+      onclick: () => {
+        source = source === s ? '' : s;
+        chips.forEach((c) => c.setAttribute('aria-pressed', String(c.textContent === source)));
+      },
+    }, s),
+  );
   panel.append(
     h('form', {
       class: 'form',
@@ -522,23 +555,27 @@ function renderWishForm(v: Extract<View, { kind: 'form' }>) {
           return;
         }
         const cur = view.kind === 'form' ? view : v;
-        const w = store.addWish(nm, cur.lng, cur.lat, note.value.trim());
+        const w = store.addWish(nm, cur.lng, cur.lat, note.value.trim(), { source: source || undefined, kind: cur.placeKind });
         clearPickMarker();
         setView({ kind: 'wish', id: w.id });
-        toast('Pinned to your wish list ♥');
+        toast('Pinned!');
       },
     },
       h('div', { class: 'panel__head' },
         h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Cancel', onclick: cancel }, '✕'),
-        h('h2', { class: 'grow' }, 'Add to wish list'),
+        h('h2', { class: 'grow' }, 'Pin a place to try'),
       ),
       modeTabs(v),
       h('label', { for: 'f-name' }, 'Place', name),
       h('p', { class: 'hint' }, 'Drag the pin or tap the map to adjust the spot.'),
+      h('div', { class: 'form__group', role: 'group', 'aria-label': 'Where did you see it?' },
+        h('p', { class: 'form__legend' }, 'Where did you see it?'),
+        h('div', { class: 'chips' }, ...chips),
+      ),
       h('label', { for: 'f-note' }, 'Note', note),
       error,
       h('div', { class: 'row' },
-        h('button', { type: 'submit', class: 'btn btn--wish grow' }, '♥ Save to wish list'),
+        h('button', { type: 'submit', class: 'btn btn--wish grow' }, svgIcon(PIN_SVG), 'Pin it'),
         h('button', { type: 'button', class: 'btn btn--ghost', onclick: cancel }, 'Cancel'),
       ),
     ),

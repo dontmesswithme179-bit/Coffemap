@@ -1,10 +1,10 @@
 {
   "name": "CoffeMap",
   "short_name": "CoffeMap",
-  "description": "Rate coffee across Israel. Part the clouds, raise a building.",
+  "description": "Pin places you want to try, then rate them once you've been.",
   "start_url": "./",
   "display": "standalone",
-  "background_color": "#3b2418",
-  "theme_color": "#3b2418",
+  "background_color": "#f7f1e3",
+  "theme_color": "#f7f1e3",
   "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
 }

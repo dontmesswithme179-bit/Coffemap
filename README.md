@@ -1,25 +1,32 @@
-# ☕ CoffeMap
+# CoffeMap
 
-A personal coffee map of Israel. The whole country starts hidden under animated clouds.
-Every time you drink a coffee somewhere, rate it and add a note — the clouds part over
-that spot and a 3D building rises there. Better coffee, taller (and greener) tower.
+A personal scrapbook map of Israel's cafés and restaurants. Saw a place in an ad, on Instagram or from a
+friend? Pin it to the map instead of a note on your phone. When you finally go, rate it: the tracing paper
+covering the map tears away there and the place gets a coffee-ring stain and a gold star.
 
 ## Features
 
-- **Map of Israel** (MapLibre GL + free [OpenFreeMap](https://openfreemap.org) tiles, no API key).
-- **Cloud fog-of-war** — a WebGL shader draws a churning fog over the map; only places you've rated are revealed, with soft wispy edges. Puffy cumulus clouds sail across on the wind above it, casting shadows on the fog and the map.
-- **Wish list** — tap **♥ Wish** (or switch the form to *Want to try*) to pin cafés you want to visit, with a note. Wish pins float above the clouds at every zoom. When you finally go, tap **Drank here — rate it** and the wish turns into a rated café.
-- **3D cafés** — each rated place gets a detailed little café model (three.js): lit shop windows, a striped awning and parasols in the rating colour (red 1★ → green 5★), the place's name on the sign, terrace tables, planters and a giant steaming latte on the roof. A ring of gold stars floating above shows the rating. Models pop in with a bounce and are enlarged when zoomed out so they stay readable.
-- **Detailed map** — streets, POIs and real OSM 3D buildings (shown slightly translucent so your café is never hidden), terrain hillshading of Israel's hills and wadis, and a hazy sky on the horizon when tilted.
-- **Rate a coffee** — tap *Rate a coffee*, then tap the map, use *📍 Use my location*, or search a café/address. The pin is draggable. If you tap a café on the map its name is pre-filled.
-- **Multiple cups per place** — rate the same place again; the building reflects the average. Each cup keeps its stars, notes and date.
-- **Export / import** your ratings as JSON (⋯ menu). Data is stored in your browser (`localStorage`), so export to back up or move to another device.
+- **Paper street map** of Israel (MapLibre GL + free [OpenFreeMap](https://openfreemap.org) tiles, recoloured
+  like a printed map), with terrain shading.
+- **Tracing paper over the unexplored** — a WebGL shader draws translucent paper with fibres over the map and
+  tears ragged holes around places you've visited.
+- **Pin to try** — save a place with where you saw it (Instagram, an ad, a friend…) and a note. Pins are taped-on
+  clippings that stay above the paper at every zoom (a red pushpin far out, a name tag mid-way).
+- **I went · rate it** — stars, notes and date per visit; visited places show a coffee-ring stain, a star sticker
+  and a handwritten score. Rating a pinned place unpins it.
+- **Pop-up 3D at street level** — zoom right in and the coffee-shop model (`public/models/coffee-shop.glb`) and
+  low-poly houses around it rise up like a pop-up book.
+- **Place directory** — ~17,000 cafés and eating places from Overture Maps for search, tappable dots and
+  snapping a tap or your GPS position to the real place.
+- **Export / import** your scrapbook as JSON (⋯ menu). Data is stored in your browser (`localStorage`), so
+  export to back up or move to another device.
 - Works on phones (bottom-sheet layout) and can be added to the home screen.
 
 ## Café 3D model
 
-Rated cafés use `public/models/coffee-shop.glb` (glTF binary). The app fills its cup with coffee and adds
-steam, a floating star ring for the rating and a chalkboard sign with the café's name. If the file is missing
+At street level (zoom ≥ 16.3) rated places pop up as `public/models/coffee-shop.glb` (glTF binary). The app
+fills its cup with coffee and adds steam, a floating star ring for the rating and a chalkboard sign with the
+place's name. If the file is missing
 or fails to load, the hand-built café in `src/cafe-model.ts` is used instead.
 
 To swap in another model (metres, base at y=0, shop front facing +Z):

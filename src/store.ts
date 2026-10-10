@@ -21,6 +21,10 @@ export interface Wish {
   lat: number;
   note: string;
   addedAt: string; // ISO timestamp
+  /** Where you came across it: "Instagram", "Bus-stop ad", "A friend"... */
+  source?: string;
+  /** Kind of place when picked from the directory: c café, r restaurant, q quick bite, b bakery. */
+  kind?: 'c' | 'r' | 'q' | 'b';
 }
 
 const KEY = 'coffemap.places.v1';
@@ -89,14 +93,14 @@ class Store {
     return this.wishes.find((w) => w.id === id);
   }
 
-  addWish(name: string, lng: number, lat: number, note: string): Wish {
-    const wish: Wish = { id: uid(), name, lng, lat, note, addedAt: new Date().toISOString() };
+  addWish(name: string, lng: number, lat: number, note: string, extra: Pick<Wish, 'source' | 'kind'> = {}): Wish {
+    const wish: Wish = { id: uid(), name, lng, lat, note, addedAt: new Date().toISOString(), ...extra };
     this.wishes = [...this.wishes, wish];
     this.commit();
     return wish;
   }
 
-  updateWish(id: string, patch: Partial<Pick<Wish, 'name' | 'note'>>) {
+  updateWish(id: string, patch: Partial<Pick<Wish, 'name' | 'note' | 'source'>>) {
     this.wishes = this.wishes.map((w) => (w.id === id ? { ...w, ...patch } : w));
     this.commit();
   }

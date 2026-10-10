@@ -1,13 +1,12 @@
-import { Map as MLMap, Marker, NavigationControl, setRTLTextPlugin, setWorkerUrl, type GeoJSONSource, type LngLatLike } from 'maplibre-gl';
+import { Map as MLMap, Marker, NavigationControl, setRTLTextPlugin, setWorkerUrl, type GeoJSONSource, type LayerSpecification, type LngLatLike } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 // MapLibre locates its worker relative to its own module URL, which bundling breaks, so bundle it explicitly.
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
-import type { FeatureCollection, Point } from 'geojson';
 import { avgRating, type Place, type Wish } from './store';
 import { Clouds, type Hole } from './clouds';
-import { CafeLayer } from './cafe-layer';
+import { CafeLayer, POPUP_ZOOM } from './cafe-layer';
 import { footprintsAround } from './houses';
-import { placesGeoJSON } from './place-directory';
+import { placesGeoJSON, type PlaceKind } from './place-directory';
 
 export const ISRAEL_BOUNDS: [[number, number], [number, number]] = [[34.2, 29.45], [35.95, 33.35]];
 const MAX_BOUNDS: [[number, number], [number, number]] = [[32.6, 28.6], [37.6, 34.2]];
@@ -20,6 +19,33 @@ const HOUSE_RADIUS = REVEAL_METERS;
 const REVEAL_MIN_PX = 34;
 const GROW_MS = 1400;
 const REVEAL_MS = 1800;
+
+const TAPE_COLORS = ['#a9d4cb', '#f2b6b0', '#f4d36b', '#c9c2ec', '#b9d99b'];
+export const CLIP_COLORS: Record<PlaceKind, string> = { c: '#f4d8a8', r: '#f0c2b0', q: '#f6dc9c', b: '#e7cfe3' };
+const icon = (paths: string) =>
+  `<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+export const KIND_ICONS: Record<PlaceKind, string> = {
+  c: icon('<path d="M4 9h12v5a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5z"/><path d="M16 11h2a2 2 0 0 1 0 4h-2"/><path d="M8 3c0 2 2 2 2 4M12 3c0 2 2 2 2 4"/>'),
+  r: icon('<circle cx="12" cy="13" r="6"/><path d="M4 3v6a2 2 0 0 0 2 2M4 3v18M20 3c-2 0-3 2-3 5s1 4 3 4v9"/>'),
+  q: icon('<path d="M4 13c0-5 4-8 8-8s8 3 8 8H4z"/><path d="M3 13h18v2a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3z"/>'),
+  b: icon('<path d="M4 14c0-5 4-8 8-8s8 3 8 8H4z"/><path d="M4 14h16v3H4z"/>'),
+};
+export const STAR_SVG =
+  '<svg width="34" height="34" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l3 6.5 7 .8-5.2 4.8 1.5 7L12 17.6 5.7 21.1l1.5-7L2 9.3l7-.8z" fill="#f2b630" stroke="#ffffff" stroke-width="1.4" stroke-linejoin="round"/></svg>';
+
+/** MapLibre owns a marker element's transform/opacity, so our tilt, grow and hide go on a child. */
+function markerWrap(child: HTMLElement) {
+  const wrap = document.createElement('div');
+  wrap.className = 'marker-wrap';
+  wrap.append(child);
+  return wrap;
+}
+
+function hashString(s: string) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+  return h >>> 0;
+}
 
 /** Colour ramp from a disappointing cup to a perfect one. */
 export const RATING_COLORS: [number, string][] = [
@@ -34,11 +60,6 @@ export function ratingColor(r: number): string {
   for (let i = RATING_COLORS.length - 1; i >= 0; i--) if (r >= RATING_COLORS[i][0]) return RATING_COLORS[i][1];
   return RATING_COLORS[0][1];
 }
-
-const colorExpr = (prop: string) => [
-  'interpolate', ['linear'], ['get', prop],
-  ...RATING_COLORS.flatMap(([r, c]) => [r, c]),
-];
 
 const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
 const clamp01 = (t: number) => Math.max(0, Math.min(1, t));
@@ -60,6 +81,7 @@ export class CoffeeMap {
   readonly clouds: Clouds;
   private cafes = new CafeLayer((id) => this.progress(id, GROW_MS));
   private wishMarkers = new Map<string, { marker: Marker; label: HTMLElement }>();
+  private stainMarkers = new Map<string, { marker: Marker; label: HTMLElement; el: HTMLElement }>();
   /** The style's 3D building layers, with their original filters, so houses can replace them near cafés. */
   private buildingLayers: { id: string; source: string; sourceLayer: string; filter: unknown }[] = [];
 
@@ -90,21 +112,24 @@ export class CoffeeMap {
       if (id) return this.events.onPlaceClick(id);
       this.events.onMapClick(e.lngLat.lng, e.lngLat.lat, this.poiNameAt(e.point.x, e.point.y));
     });
-    // Wish-list pins show their names once you're zoomed in enough for them not to clutter.
-    const syncWishLabels = () => container.classList.toggle('show-wish-labels', this.map.getZoom() >= 12.5);
-    this.map.on('zoom', syncWishLabels);
-    syncWishLabels();
+    // Markers change form with zoom: tiny far out, name tags mid-way, full clippings close up,
+    // and stains step aside once the 3D café pops up at street level.
+    const syncZoomClasses = () => {
+      const z = this.map.getZoom();
+      container.classList.toggle('zoom-far', z < 11);
+      container.classList.toggle('zoom-near', z >= 14);
+      container.classList.toggle('zoom-popup', z >= POPUP_ZOOM);
+    };
+    this.map.on('zoom', syncZoomClasses);
+    syncZoomClasses();
     this.map.on('mousemove', (e) => {
       this.map.getCanvas().style.cursor = this.placeAt(e.point.x, e.point.y) ? 'pointer' : '';
     });
   }
 
+  /** A 3D café under the point (stains and clippings are DOM markers with their own clicks). */
   private placeAt(x: number, y: number): string | null {
-    if (!this.loaded) return null;
-    const cafe = this.cafes.hitTest(x, y);
-    if (cafe) return cafe;
-    const hit = this.map.queryRenderedFeatures([x, y], { layers: ['place-dot'] });
-    return hit[0]?.properties?.id ? String(hit[0].properties.id) : null;
+    return this.loaded ? this.cafes.hitTest(x, y) : null;
   }
 
   /** Extra detail on top of the base style: terrain shading, sky/haze, softer real buildings. */
@@ -127,12 +152,14 @@ export class CoffeeMap {
       source: 'dem',
       paint: {
         'hillshade-exaggeration': ['interpolate', ['linear'], ['zoom'], 6, 0.45, 12, 0.3, 15, 0.12],
-        'hillshade-shadow-color': '#6b5444',
-        'hillshade-highlight-color': '#fff8ea',
-        'hillshade-accent-color': '#8a6f5c',
+        'hillshade-shadow-color': '#8a7258',
+        'hillshade-highlight-color': '#fffaf0',
+        'hillshade-accent-color': '#9c8468',
         'hillshade-illumination-anchor': 'map',
       },
     }, before);
+
+    this.paperStyle(layers);
 
     // Real OSM buildings: warm, slightly translucent, so a café inside one stays visible.
     for (const l of layers) {
@@ -145,9 +172,9 @@ export class CoffeeMap {
     }
 
     map.setSky({
-      'sky-color': '#a9cdea',
-      'horizon-color': '#f6e9d6',
-      'fog-color': '#f1e7da',
+      'sky-color': '#e9e1cf',
+      'horizon-color': '#f7f1e3',
+      'fog-color': '#f4ecdc',
       'sky-horizon-blend': 0.7,
       'horizon-fog-blend': 0.6,
       'fog-ground-blend': 0.35,
@@ -164,54 +191,6 @@ export class CoffeeMap {
       console.warn('Style enhancements skipped', err);
     }
 
-    const empty: FeatureCollection = { type: 'FeatureCollection', features: [] };
-    map.addSource('places-pt', { type: 'geojson', data: empty });
-
-    map.addLayer({
-      id: 'place-glow',
-      type: 'circle',
-      source: 'places-pt',
-      paint: {
-        'circle-radius': ['interpolate', ['linear'], ['zoom'], 7, 10, 12, 22, 16, 60],
-        'circle-color': colorExpr('rating') as never,
-        'circle-blur': 1,
-        'circle-opacity': ['*', 0.45, ['get', 'grow']],
-        'circle-pitch-alignment': 'map',
-      },
-    });
-    map.addLayer({
-      id: 'place-dot',
-      type: 'circle',
-      source: 'places-pt',
-      paint: {
-        'circle-radius': ['interpolate', ['linear'], ['zoom'], 7, 5, 12, 7, 14.5, 4],
-        'circle-color': colorExpr('rating') as never,
-        'circle-stroke-color': '#fff',
-        'circle-stroke-width': 2,
-        'circle-opacity': ['interpolate', ['linear'], ['zoom'], 13.5, 1, 15, 0],
-        'circle-stroke-opacity': ['interpolate', ['linear'], ['zoom'], 13.5, 1, 15, 0],
-      },
-    });
-    map.addLayer({
-      id: 'place-label',
-      type: 'symbol',
-      source: 'places-pt',
-      layout: {
-        'text-field': ['format', ['get', 'name'], {}, '\n', {}, ['get', 'stars'], { 'font-scale': 0.85 }],
-        'text-font': ['Noto Sans Bold'],
-        'text-size': ['interpolate', ['linear'], ['zoom'], 9, 11, 15, 14],
-        'text-anchor': 'top',
-        'text-offset': [0, 0.9],
-        'text-allow-overlap': false,
-      },
-      paint: {
-        'text-color': '#3b2418',
-        'text-halo-color': '#fffaf2',
-        'text-halo-width': 1.6,
-        // The 3D café carries its own name sign once you're close.
-        'text-opacity': ['interpolate', ['linear'], ['zoom'], 15.5, ['get', 'grow'], 16.5, 0],
-      },
-    });
     // Every known café and eating place (Overture Maps), shown while choosing a spot so you can just tap it.
     // Cafés appear from further out and are drawn on top; restaurants etc. join in when zoomed in.
     map.addSource('known-places', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
@@ -295,6 +274,46 @@ export class CoffeeMap {
     this.collectHouses();
   }
 
+  /**
+   * Recolour the base map like a printed paper street map (scrapbook look): cream ground, pale
+   * blue water, tan roads, muted parks and brown ink labels. Matches layers by id so it works
+   * with any OpenMapTiles-style map; layers it doesn't recognise keep their colours.
+   */
+  private paperStyle(layers: LayerSpecification[]) {
+    const set = (id: string, prop: string, value: unknown) => {
+      try {
+        this.map.setPaintProperty(id, prop as never, value as never);
+      } catch {
+        /* property not on this layer */
+      }
+    };
+    for (const l of layers) {
+      const id = l.id.toLowerCase();
+      if (l.type === 'background') set(l.id, 'background-color', '#f7f1e3');
+      else if (l.type === 'fill') {
+        if (/water|ocean|sea|lake|river/.test(id)) set(l.id, 'fill-color', '#cfe3e6');
+        else if (/park|grass|wood|forest|wetland|garden|cemetery|pitch|golf|landcover/.test(id)) set(l.id, 'fill-color', '#e4e8cf');
+        else if (/sand|beach|desert/.test(id)) set(l.id, 'fill-color', '#f1e5c4');
+        else if (/building/.test(id)) set(l.id, 'fill-color', '#ece2cf');
+        else if (/landuse|residential|industrial|commercial|retail|school|hospital|aeroway/.test(id)) set(l.id, 'fill-color', '#f2eadb');
+      } else if (l.type === 'line') {
+        if (/water|river|stream|canal/.test(id)) set(l.id, 'line-color', '#a9cfd6');
+        else if (/boundary|admin/.test(id)) set(l.id, 'line-color', '#c3ab88');
+        else if (/rail|transit/.test(id)) set(l.id, 'line-color', '#c9bba5');
+        else if (/road|highway|street|bridge|tunnel|path|motorway|trunk|primary|secondary|tertiary|minor|service/.test(id)) {
+          if (/casing|outline/.test(id)) set(l.id, 'line-color', '#d8c19c');
+          else if (/motorway|trunk|primary/.test(id)) set(l.id, 'line-color', '#e2bf8c');
+          else if (/path|footway|track|cycle|pedestrian/.test(id)) set(l.id, 'line-color', '#d9c7a6');
+          else set(l.id, 'line-color', '#fbf4e4');
+        }
+      } else if (l.type === 'symbol') {
+        set(l.id, 'text-color', /water|ocean|sea|lake|river/.test(id) ? '#4f7f88' : '#4a3f35');
+        set(l.id, 'text-halo-color', '#f7f1e3');
+        set(l.id, 'icon-opacity', 0.75);
+      }
+    }
+  }
+
   /** Drop the plain extruded buildings around cafés; houses are drawn there instead. */
   private hideBuildingsNearCafes() {
     const pts = this.places.map((p) => [p.lng, p.lat]);
@@ -340,7 +359,8 @@ export class CoffeeMap {
   };
 
   /**
-   * Wish-list pins are DOM markers, so they sit above the clouds and stay visible at every zoom.
+   * Wish-list places are taped-on clippings (DOM markers), so they sit above the tracing paper and
+   * stay visible at every zoom. CSS shrinks them to a pin far out and a name tag mid-way.
    */
   setWishes(wishes: Wish[]) {
     const seen = new Set<string>();
@@ -350,33 +370,80 @@ export class CoffeeMap {
       if (existing) {
         existing.marker.setLngLat([w.lng, w.lat]);
         existing.label.textContent = w.name;
+        existing.marker.getElement().firstElementChild?.setAttribute('aria-label', `Wish list: ${w.name}`);
         continue;
       }
+      const seed = hashString(w.id);
       const el = document.createElement('button');
       el.type = 'button';
-      el.className = 'wish-pin';
+      el.className = 'clip';
       el.setAttribute('aria-label', `Wish list: ${w.name}`);
-      const bubble = document.createElement('span');
-      bubble.className = 'wish-pin__bubble';
-      const heart = document.createElement('i');
-      heart.textContent = '♥';
-      bubble.append(heart);
+      el.style.setProperty('--rot', `${((seed % 140) / 10 - 7).toFixed(1)}deg`);
+      el.style.setProperty('--tape', TAPE_COLORS[seed % TAPE_COLORS.length]);
+      const kind = w.kind ?? 'c';
+      el.style.setProperty('--photo', CLIP_COLORS[kind]);
+      const tape = document.createElement('span');
+      tape.className = 'clip__tape';
+      const photo = document.createElement('span');
+      photo.className = 'clip__photo';
+      photo.innerHTML = KIND_ICONS[kind]; // static SVG markup, no user input
       const label = document.createElement('span');
-      label.className = 'wish-pin__label';
+      label.className = 'clip__name';
       label.textContent = w.name;
-      el.append(bubble, label);
-      el.style.setProperty('--delay', `${(this.wishMarkers.size % 7) * -0.4}s`);
+      el.append(tape, photo, label);
       el.addEventListener('click', (e) => {
         e.stopPropagation();
         this.events.onWishClick(w.id);
       });
-      const marker = new Marker({ element: el, anchor: 'bottom' }).setLngLat([w.lng, w.lat]).addTo(this.map);
+      const marker = new Marker({ element: markerWrap(el), anchor: 'bottom' }).setLngLat([w.lng, w.lat]).addTo(this.map);
       this.wishMarkers.set(w.id, { marker, label });
     }
     for (const [id, m] of this.wishMarkers) {
       if (seen.has(id)) continue;
       m.marker.remove();
       this.wishMarkers.delete(id);
+    }
+  }
+
+  /** Visited places: a coffee-ring stain, a gold star sticker and a handwritten name with the score. */
+  private syncStains() {
+    const seen = new Set<string>();
+    for (const p of this.places) {
+      seen.add(p.id);
+      const text = `${p.name} — ${avgRating(p).toFixed(1)}!`;
+      const existing = this.stainMarkers.get(p.id);
+      if (existing) {
+        existing.marker.setLngLat([p.lng, p.lat]);
+        existing.label.textContent = text;
+        continue;
+      }
+      const seed = hashString(p.id);
+      const el = document.createElement('button');
+      el.type = 'button';
+      el.className = 'stain';
+      el.setAttribute('aria-label', `Visited: ${p.name}`);
+      el.style.setProperty('--rot', `${((seed % 90) / 10 - 4.5).toFixed(1)}deg`);
+      el.style.setProperty('--ring-rot', `${seed % 360}deg`);
+      const ring = document.createElement('span');
+      ring.className = 'stain__ring';
+      const star = document.createElement('span');
+      star.className = 'stain__star';
+      star.innerHTML = STAR_SVG; // static SVG markup, no user input
+      const label = document.createElement('span');
+      label.className = 'stain__name';
+      label.textContent = text;
+      el.append(ring, star, label);
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.events.onPlaceClick(p.id);
+      });
+      const marker = new Marker({ element: markerWrap(el), anchor: 'center' }).setLngLat([p.lng, p.lat]).addTo(this.map);
+      this.stainMarkers.set(p.id, { marker, label, el });
+    }
+    for (const [id, m] of this.stainMarkers) {
+      if (seen.has(id)) continue;
+      m.marker.remove();
+      this.stainMarkers.delete(id);
     }
   }
 
@@ -409,28 +476,14 @@ export class CoffeeMap {
 
   private render = () => {
     if (!this.loaded) return;
-    const pts: FeatureCollection<Point> = { type: 'FeatureCollection', features: [] };
+    this.syncStains();
     let pending = false;
-
     for (const p of this.places) {
-      const rating = avgRating(p);
       const raw = this.progress(p.id, GROW_MS);
       if (raw < 1) pending = true;
-      const props = { id: p.id, rating };
-      pts.features.push({
-        type: 'Feature',
-        geometry: { type: 'Point', coordinates: [p.lng, p.lat] },
-        properties: {
-          ...props,
-          name: p.name,
-          stars: `${rating.toFixed(1)} / 5`,
-          grow: clamp01(raw * 1.5),
-        },
-      });
+      // Stains soak in as the paper tears away.
+      this.stainMarkers.get(p.id)?.el.style.setProperty('--grow', String(easeOutCubic(clamp01(raw * 1.3))));
     }
-
-    (this.map.getSource('places-pt') as GeoJSONSource | undefined)?.setData(pts);
-
     if (pending && !this.animating) {
       this.animating = true;
       requestAnimationFrame(() => {
@@ -447,7 +500,6 @@ export class CoffeeMap {
       anchorX: anchor.x,
       anchorY: anchor.y,
       scale: 260 * Math.pow(2, (z - 8) * 0.35),
-      cloudScale: 300 * Math.pow(2, (z - 8) * 0.12),
     };
   }
 

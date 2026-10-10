@@ -3,8 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#3b2418" />
-    <meta name="description" content="A personal map of Israel's coffee. Rate a cup, part the clouds, raise a building." />
+    <meta name="theme-color" content="#f7f1e3" />
+    <meta name="description" content="Pin the cafés and restaurants you want to try, then tear the paper away and rate them once you've been." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@500;700&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet" />
     <link rel="icon" href="./icon.svg" type="image/svg+xml" />
     <link rel="manifest" href="./manifest.webmanifest" />
     <title>CoffeMap</title>
@@ -14,11 +17,8 @@
 
     <header class="topbar">
       <div class="brand">
-        <span class="brand__cup" aria-hidden="true">☕</span>
-        <div>
-          <h1>CoffeMap</h1>
-          <p id="stats" class="brand__stats">No cups rated yet</p>
-        </div>
+        <h1>CoffeMap</h1>
+        <p id="stats" class="brand__stats">Nothing pinned yet</p>
       </div>
       <form id="search" class="search" role="search" autocomplete="off">
         <input id="search-input" type="search" placeholder="Search a café, restaurant or address…" aria-label="Search places" />
@@ -27,7 +27,7 @@
       <div class="menu">
         <button id="menu-btn" class="icon-btn" aria-label="Menu" aria-haspopup="true">⋯</button>
         <div id="menu" class="menu__list" hidden>
-          <button data-action="export">Export ratings &amp; wish list</button>
+          <button data-action="export">Export my scrapbook</button>
           <button data-action="import">Import ratings…</button>
           <button data-action="reset-view">Show all of Israel</button>
         </div>
@@ -44,11 +44,13 @@
     </div>
 
     <div id="fabs" class="fabs">
-      <button id="rate-btn" class="fab">
-        <span aria-hidden="true">＋</span> Rate a coffee
+      <button id="wish-btn" class="fab fab--wish">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4h6l-1 6 3 3H7l3-3z"/><path d="M12 13v7"/></svg>
+        Pin to try
       </button>
-      <button id="wish-btn" class="fab fab--wish" aria-label="Add to wish list">
-        <span aria-hidden="true">♥</span> Wish
+      <button id="rate-btn" class="fab">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l2.7 5.8 6.3.7-4.7 4.3 1.3 6.2L12 17l-5.6 3 1.3-6.2L3 9.5l6.3-.7z"/></svg>
+        I went
       </button>
     </div>
 
