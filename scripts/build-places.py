@@ -1,10 +1,11 @@
-"""Build public/data/cafes-il.json from Overture Maps places (free, no sign-up).
+"""Build public/data/places-il.json from Overture Maps places (free, no sign-up).
 
     python3 -m venv .venv && .venv/bin/pip install pyarrow fsspec aiohttp
-    .venv/bin/python scripts/build-cafes.py 2026-09-23.1 public/data/cafes-il.json
+    .venv/bin/python scripts/build-places.py 2026-09-23.1 public/data/places-il.json
 
-Reads only the parquet row groups overlapping Israel, keeps coffee shops / cafés in Israel with
-confidence >= 0.4, and writes compact rows: [lng, lat, name, address, confidence%].
+Reads only the parquet row groups overlapping Israel, keeps cafés and eating places in Israel with
+confidence >= 0.4, and writes compact rows: [lng, lat, name, address, confidence%, kind] where kind is
+"c" café, "r" restaurant, "q" quick bite (fast food, deli, food truck...), "b" bakery / dessert.
 Release names: https://docs.overturemaps.org/release/latest/ (or list s3://overturemaps-us-west-2/release/).
 """
 import json, re, sys
@@ -14,7 +15,27 @@ from concurrent.futures import ThreadPoolExecutor
 REL, OUT = sys.argv[1], sys.argv[2]
 W, S, E, N = 34.2, 29.45, 35.95, 33.35
 HOST = "https://overturemaps-us-west-2.s3.amazonaws.com/"
-CATEGORIES = {"coffee_shop", "cafe", "coffee_roastery", "tea_room"}
+COFFEE = {"coffee_shop", "cafe", "coffee_roastery", "tea_room"}
+BAKERY = {"bakery", "dessert_shop", "bagel_shop", "ice_cream_shop", "frozen_yoghurt_shop", "patisserie", "cupcake_shop", "donut_shop"}
+QUICK = {"fast_food_restaurant", "food_truck_stand", "sandwich_shop", "delicatessen", "diner", "food_court", "food_stand", "kiosk"}
+SKIP = {"candy_store", "chocolatier"}  # sweet shops rather than places to eat
+
+
+def kind_of(taxonomy):
+    primary = (taxonomy or {}).get("primary") or ""
+    hierarchy = (taxonomy or {}).get("hierarchy") or []
+    if primary in COFFEE:
+        return "c"
+    if hierarchy[:1] != ["food_and_drink"] or len(hierarchy) < 2 or hierarchy[1] not in ("restaurant", "casual_eatery"):
+        return None
+    if primary in SKIP:
+        return None
+    if primary in BAKERY:
+        return "b"
+    if primary in QUICK:
+        return "q"
+    return "r"
+
 COLS = ["names", "confidence", "taxonomy", "bbox", "addresses"]
 
 fs = fsspec.filesystem("https", client_kwargs={"trust_env": True})
@@ -48,7 +69,8 @@ with ThreadPoolExecutor(4) as ex:
 
 rows = []
 for r in pa.concat_tables(tables).to_pylist():
-    if (r["taxonomy"] or {}).get("primary") not in CATEGORIES or (r["confidence"] or 0) < 0.4:
+    kind = kind_of(r["taxonomy"])
+    if not kind or (r["confidence"] or 0) < 0.4:
         continue
     addr = (r["addresses"] or [{}])[0]
     if addr.get("country") != "IL":
@@ -60,13 +82,14 @@ for r in pa.concat_tables(tables).to_pylist():
     city = (addr.get("locality") or "").strip()
     address = ", ".join(p for p in (street, city) if p and p not in street) if street else city
     bb = r["bbox"]
-    rows.append([round(bb["xmin"], 6), round(bb["ymin"], 6), name.strip(), address, round(r["confidence"] * 100)])
+    rows.append([round(bb["xmin"], 5), round(bb["ymin"], 5), name.strip(), address, round(r["confidence"] * 100), kind])
 
 rows.sort(key=lambda r: (-r[4], r[2]))
 with open(OUT, "w", encoding="utf-8") as f:
     json.dump({
         "source": f"Overture Maps Foundation places, release {REL}",
         "license": "CDLA-Permissive-2.0 (https://cdla.dev/permissive-2-0/); see https://docs.overturemaps.org/attribution/",
-        "cafes": rows,
+        "places": rows,
     }, f, ensure_ascii=False, separators=(",", ":"))
-print(f"{len(rows)} cafés → {OUT}")
+counts = {k: sum(1 for r in rows if r[5] == k) for k in "crqb"}
+print(f"{len(rows)} places {counts} → {OUT}")

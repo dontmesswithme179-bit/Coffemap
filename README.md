@@ -38,12 +38,13 @@ building outline gets a random low-poly house from `public/models/houses.glb` (2
 fit the outline. Houses are drawn with instancing and skipped where the enlarged café model would cover them.
 Convert a new pack with `scripts/houses-fbx-to-glb.mjs` (instructions at the top of the file).
 
-## Café directory
+## Place directory
 
-`public/data/cafes-il.json` lists ~3,200 cafés in Israel (names and exact locations) from the free
-[Overture Maps](https://overturemaps.org) places dataset (CDLA-Permissive-2.0). It powers café search, the café
-dots shown while choosing a spot, and snapping a tap (or your GPS position) to the café you meant. Refresh it with
-`scripts/build-cafes.py` (instructions at the top of the file) when Overture publishes a new release.
+`public/data/places-il.json` lists ~17,000 cafés and eating places in Israel (cafés, restaurants, quick bites,
+bakeries & dessert shops) with names and exact locations, from the free [Overture Maps](https://overturemaps.org)
+places dataset (CDLA-Permissive-2.0). It powers search, the coloured dots shown while choosing a spot, and snapping
+a tap (or your GPS position) to the place you meant. Refresh it with `scripts/build-places.py` (instructions at the
+top of the file) when Overture publishes a new release.
 
 ## Develop
 

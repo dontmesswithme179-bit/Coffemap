@@ -3,7 +3,7 @@ import './style.css';
 import { avgRating, lastVisit, store, type Place, type Wish } from './store';
 import { CoffeeMap, ratingColor } from './map';
 import { searchPlaces, type SearchResult } from './search';
-import { loadCafes, nearestCafe, searchCafes, type KnownCafe } from './cafe-directory';
+import { KIND_INFO, loadPlaces, nearestPlace, searchKnownPlaces, type KnownPlace } from './place-directory';
 
 /** Rating a coffee you drank, or saving a place to try later. */
 type Mode = 'rate' | 'wish';
@@ -100,7 +100,7 @@ function updateStats() {
 function startPicking(mode: Mode = 'rate') {
   picking = true;
   pickMode = mode;
-  $('#pick-text').textContent = mode === 'wish' ? 'Tap the café you want to try' : 'Tap the café (or the spot) where you had your coffee';
+  $('#pick-text').textContent = mode === 'wish' ? 'Tap the place you want to try' : 'Tap the café, restaurant or spot where you were';
   document.body.classList.add('is-picking');
   $('#pick-banner').hidden = false;
   cmap.clouds.setOpacity(0.25);
@@ -126,9 +126,9 @@ function clearPickMarker() {
  */
 function choosePoint(lng: number, lat: number, name: string, snapMetres = Math.max(12, cmap.pxToMetres(28, lat))) {
   const mode: Mode = view.kind === 'form' ? view.mode : pickMode;
-  // Snap to a known café near the point, so the name and the spot are the café's real ones.
+  // Snap to a known café or eating place near the point, so the name and the spot are its real ones.
   if (snapMetres > 0) {
-    const known = nearestCafe(lng, lat, snapMetres);
+    const known = nearestPlace(lng, lat, snapMetres);
     if (known) {
       lng = known.lng;
       lat = known.lat;
@@ -169,7 +169,7 @@ function locateMe() {
     (pos) => {
       const { longitude: lng, latitude: lat, accuracy } = pos.coords;
       cmap.flyTo([lng, lat], 17);
-      // GPS is off by tens of metres indoors; look for the café you're probably sitting in.
+      // GPS is off by tens of metres indoors; look for the place you're probably sitting in.
       choosePoint(lng, lat, '', Math.min(80, Math.max(30, accuracy || 0)));
     },
     () => toast("Couldn't get your location"),
@@ -184,7 +184,7 @@ function render() {
   panel.replaceChildren();
   panel.dataset.view = view.kind;
   $('#fabs').hidden = view.kind === 'form';
-  cmap.setKnownCafesVisible(picking || (view.kind === 'form' && !view.placeId && !view.wishId));
+  cmap.setKnownPlacesVisible(picking || (view.kind === 'form' && !view.placeId && !view.wishId));
   if (view.kind !== 'form') {
     clearPickMarker();
     if (!picking) cmap.clouds.setOpacity(1);
@@ -565,9 +565,9 @@ $('#search').addEventListener('submit', async (e) => {
   if (q.length < 2) return;
   resultsEl.hidden = false;
   resultsEl.replaceChildren(h('li', { class: 'muted' }, 'Searching…'));
-  // Cafés from the bundled directory (exact names and spots) first, then streets/addresses.
-  const [cafes, places] = await Promise.all([
-    searchCafes(q, cmap.map.getCenter()),
+  // Cafés and eating places from the bundled directory (exact names and spots) first, then streets/addresses.
+  const [known, places] = await Promise.all([
+    searchKnownPlaces(q, cmap.map.getCenter()),
     searchPlaces(q).catch(() => null),
   ]);
   lastResults = places ?? [];
@@ -578,15 +578,16 @@ $('#search').addEventListener('submit', async (e) => {
     choosePoint(lng, lat, name, 0);
   };
   const items: HTMLElement[] = [
-    ...cafes.map((c: KnownCafe) =>
+    ...known.map((c: KnownPlace) =>
       h('li', {},
         h('button', { type: 'button', onclick: () => pick(c.lng, c.lat, c.name) },
-          h('strong', {}, `☕ ${c.name}`), h('small', {}, [c.address || 'Café', distanceLabel(c.lng, c.lat)].join(' · '))),
+          h('strong', {}, `${KIND_INFO[c.kind].icon} ${c.name}`),
+          h('small', {}, [c.address || KIND_INFO[c.kind].label, distanceLabel(c.lng, c.lat)].join(' · '))),
       ),
     ),
     ...lastResults
-      // Skip address hits that are just the same café again.
-      .filter((r) => !cafes.some((c) => Math.abs(c.lat - r.lat) < 0.0003 && Math.abs(c.lng - r.lng) < 0.0003))
+      // Skip address hits that are just the same place again.
+      .filter((r) => !known.some((c) => Math.abs(c.lat - r.lat) < 0.0003 && Math.abs(c.lng - r.lng) < 0.0003))
       .map((r) =>
         h('li', {},
           h('button', { type: 'button', onclick: () => pick(r.lng, r.lat, r.name) },
@@ -597,12 +598,12 @@ $('#search').addEventListener('submit', async (e) => {
   if (!items.length) {
     items.push(h('li', { class: 'muted' }, places === null ? 'Search failed — check your connection' : 'Nothing found in Israel'));
   } else if (places === null) {
-    items.push(h('li', { class: 'muted' }, 'Street search is offline; showing known cafés only'));
+    items.push(h('li', { class: 'muted' }, 'Street search is offline; showing known places only'));
   }
   resultsEl.replaceChildren(...items);
 });
-// Warm the café directory so the first tap/search is instant.
-loadCafes();
+// Warm the place directory so the first tap/search is instant.
+loadPlaces();
 document.addEventListener('click', (e) => {
   if (!(e.target as HTMLElement).closest('#search')) resultsEl.hidden = true;
   if (!(e.target as HTMLElement).closest('.menu')) $('#menu').hidden = true;

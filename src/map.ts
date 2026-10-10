@@ -7,7 +7,7 @@ import { avgRating, type Place, type Wish } from './store';
 import { Clouds, type Hole } from './clouds';
 import { CafeLayer } from './cafe-layer';
 import { footprintsAround } from './houses';
-import { cafesGeoJSON } from './cafe-directory';
+import { placesGeoJSON } from './place-directory';
 
 export const ISRAEL_BOUNDS: [[number, number], [number, number]] = [[34.2, 29.45], [35.95, 33.35]];
 const MAX_BOUNDS: [[number, number], [number, number]] = [[32.6, 28.6], [37.6, 34.2]];
@@ -77,7 +77,7 @@ export class CoffeeMap {
       maxPitch: 75,
       attributionControl: {
         compact: true,
-        customAttribution: 'Cafés: <a href="https://overturemaps.org" target="_blank" rel="noopener">Overture Maps</a>',
+        customAttribution: 'Places: <a href="https://overturemaps.org" target="_blank" rel="noopener">Overture Maps</a>',
       },
     });
     this.map.addControl(new NavigationControl({ visualizePitch: true }), 'bottom-right');
@@ -212,28 +212,31 @@ export class CoffeeMap {
         'text-opacity': ['interpolate', ['linear'], ['zoom'], 15.5, ['get', 'grow'], 16.5, 0],
       },
     });
-    // Every known café (Overture Maps), shown while choosing where you drank so you can just tap it.
-    map.addSource('known-cafes', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    // Every known café and eating place (Overture Maps), shown while choosing a spot so you can just tap it.
+    // Cafés appear from further out and are drawn on top; restaurants etc. join in when zoomed in.
+    map.addSource('known-places', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
     map.addLayer({
-      id: 'known-cafe-dot',
+      id: 'known-place-dot',
       type: 'circle',
-      source: 'known-cafes',
+      source: 'known-places',
       minzoom: 12,
-      layout: { visibility: 'none' },
+      filter: ['any', ['==', ['get', 'cafe'], 1], ['>=', ['zoom'], 14.5]],
+      layout: { visibility: 'none', 'circle-sort-key': ['get', 'cafe'] },
       paint: {
-        'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 3, 16, 7],
-        'circle-color': '#6b3f26',
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 3, 16, ['case', ['==', ['get', 'cafe'], 1], 7, 5.5]],
+        'circle-color': ['get', 'color'],
         'circle-stroke-color': '#fffaf2',
         'circle-stroke-width': 2,
       },
     });
     map.addLayer({
-      id: 'known-cafe-label',
+      id: 'known-place-label',
       type: 'symbol',
-      source: 'known-cafes',
+      source: 'known-places',
       minzoom: 15,
       layout: {
         visibility: 'none',
+        'symbol-sort-key': ['-', 1, ['get', 'cafe']],
         'text-field': ['get', 'name'],
         'text-font': ['Noto Sans Regular'],
         'text-size': 12,
@@ -243,7 +246,7 @@ export class CoffeeMap {
       },
       paint: { 'text-color': '#3b2418', 'text-halo-color': '#fffaf2', 'text-halo-width': 1.5 },
     });
-    cafesGeoJSON().then((data) => (map.getSource('known-cafes') as GeoJSONSource | undefined)?.setData(data));
+    placesGeoJSON().then((data) => (map.getSource('known-places') as GeoJSONSource | undefined)?.setData(data));
     map.addLayer(this.cafes);
 
     this.loaded = true;
@@ -377,10 +380,10 @@ export class CoffeeMap {
     }
   }
 
-  /** Show or hide the directory of known cafés (while choosing a spot). */
-  setKnownCafesVisible(on: boolean) {
+  /** Show or hide the directory of known places (while choosing a spot). */
+  setKnownPlacesVisible(on: boolean) {
     if (!this.loaded) return;
-    for (const id of ['known-cafe-dot', 'known-cafe-label']) this.map.setLayoutProperty(id, 'visibility', on ? 'visible' : 'none');
+    for (const id of ['known-place-dot', 'known-place-label']) this.map.setLayoutProperty(id, 'visibility', on ? 'visible' : 'none');
   }
 
   /** Map metres covered by `px` screen pixels at a latitude (for tap tolerances). */
